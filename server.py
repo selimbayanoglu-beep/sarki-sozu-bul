@@ -341,6 +341,33 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/pull-github":
             try:
                 import urllib.request as ureq
+
+                # Varsa gövdeden ref/sha al; yoksa GitHub API üzerinden en son commit SHA'sını çöz
+                # Böylece Fastly / GitHub Raw CDN önbelleği (5 dk) tamamen aşılır, güncellemeler anında iner.
+                target_ref = "main"
+                try:
+                    content_length = int(self.headers.get("Content-Length", 0))
+                    if content_length > 0:
+                        body_json = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                        if isinstance(body_json, dict) and body_json.get("ref"):
+                            target_ref = str(body_json["ref"]).strip()
+                except Exception:
+                    pass
+
+                # GitHub API ile doğrudan commit SHA al (asla önbelleğe takılmaz)
+                try:
+                    gh_api_url = f"https://api.github.com/repos/selimbayanoglu-beep/sarki-sozu-bul/commits/{target_ref}"
+                    gh_req = ureq.Request(
+                        gh_api_url,
+                        headers={"User-Agent": "SarkiSozuBul-Deploy/2.0", "Accept": "application/vnd.github.v3+json"},
+                    )
+                    with ureq.urlopen(gh_req, timeout=8) as gh_resp:
+                        c_info = json.loads(gh_resp.read().decode("utf-8"))
+                        if "sha" in c_info:
+                            target_ref = c_info["sha"]
+                except Exception:
+                    pass
+
                 files_to_sync = [
                     "index.html",
                     "style.css",
@@ -352,13 +379,20 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                     "manifest.json",
                     "requirements.txt",
                 ]
-                repo_base = "https://raw.githubusercontent.com/selimbayanoglu-beep/sarki-sozu-bul/main/"
+                repo_base = f"https://raw.githubusercontent.com/selimbayanoglu-beep/sarki-sozu-bul/{target_ref}/"
                 updated_files = []
                 errors = []
                 for fname in files_to_sync:
                     try:
-                        url = f"{repo_base}{fname}?t={int(datetime.datetime.now().timestamp())}"
-                        req = ureq.Request(url, headers={"Cache-Control": "no-cache", "User-Agent": "Mozilla/5.0"})
+                        url = f"{repo_base}{fname}"
+                        req = ureq.Request(
+                            url,
+                            headers={
+                                "Cache-Control": "no-cache, no-store, must-revalidate",
+                                "Pragma": "no-cache",
+                                "User-Agent": "Mozilla/5.0",
+                            },
+                        )
                         with ureq.urlopen(req, timeout=12) as resp:
                             data = resp.read()
                         if data:
@@ -377,7 +411,12 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                 except Exception:
                     pass
 
-                self._send_json({"ok": len(errors) == 0, "updated": updated_files, "errors": errors})
+                self._send_json({
+                    "ok": len(errors) == 0,
+                    "ref": target_ref,
+                    "updated": updated_files,
+                    "errors": errors,
+                })
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, 500)
             return
