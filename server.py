@@ -37,6 +37,82 @@ KEY_FILE = os.path.join(BASE_DIR, "key.pem")
 TUNNEL_URL_FILE = os.path.join(BASE_DIR, "tunnel_url.txt")
 
 _HISTORY_LOCK = threading.Lock()
+_TUNNEL_URL = ""
+
+
+def get_tunnel_url() -> str:
+    global _TUNNEL_URL
+    if _TUNNEL_URL:
+        return _TUNNEL_URL
+    if os.path.exists(TUNNEL_URL_FILE):
+        try:
+            with open(TUNNEL_URL_FILE, "r", encoding="utf-8") as f:
+                val = f.read().strip()
+                if val:
+                    _TUNNEL_URL = val
+                    return val
+        except Exception:
+            pass
+    return os.environ.get("PUBLIC_HTTPS_URL", "").strip()
+
+
+def start_cloudflared_tunnel_async(local_port: int) -> None:
+    """Mobil tarayıcı mikrofon izni için tek tıkla Cloudflare HTTPS tünelini başlatır."""
+    import platform
+    import shutil
+
+    def _run():
+        global _TUNNEL_URL
+        cf_bin = shutil.which("cloudflared")
+        candidate = os.path.join(BASE_DIR, "cloudflared")
+        if not cf_bin:
+            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+                cf_bin = candidate
+            else:
+                try:
+                    arch = platform.machine().lower()
+                    cf_arch = "arm64" if ("arm" in arch or "aarch" in arch) else "amd64"
+                    os_name = "darwin" if "darwin" in platform.system().lower() else "linux"
+                    download_url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-{os_name}-{cf_arch}"
+                    print(f"📥 Cloudflare Tunnel binary indiriliyor: {download_url}...")
+                    ctx = ssl._create_unverified_context()
+                    req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
+                    with urllib.request.urlopen(req, timeout=40, context=ctx) as resp, open(candidate, "wb") as fp:
+                        shutil.copyfileobj(resp, fp)
+                    os.chmod(candidate, 0o755)
+                    cf_bin = candidate
+                    print("✅ Cloudflare Tunnel binary hazır.")
+                except Exception as exc:
+                    sys.stderr.write(f"⚠️ Cloudflare Tunnel indirme hatası: {exc}\n")
+                    return
+
+        try:
+            print(f"🚀 Cloudflare HTTPS tüneli başlatılıyor (port {local_port})...")
+            proc = subprocess.Popen(
+                [cf_bin, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{local_port}"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                bufsize=1,
+            )
+            for line in proc.stdout:
+                match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
+                if match:
+                    found_url = match.group(0)
+                    _TUNNEL_URL = found_url
+                    try:
+                        with open(TUNNEL_URL_FILE, "w", encoding="utf-8") as f:
+                            f.write(found_url)
+                    except Exception:
+                        pass
+                    print("=" * 64)
+                    print(f"🌍 CANLI GÜVENLİ MOBİL HTTPS ADRESİ: {found_url}")
+                    print("=" * 64)
+        except Exception as exc:
+            sys.stderr.write(f"⚠️ Cloudflare Tunnel çalıştırma hatası: {exc}\n")
+
+    t = threading.Thread(target=_run, daemon=True)
+    t.start()
 
 
 def load_history() -> List[Dict[str, Any]]:
@@ -97,16 +173,6 @@ def save_to_history(song_data: Dict[str, Any]) -> None:
                 json.dump(items, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
-
-
-def get_tunnel_url() -> str:
-    if os.path.exists(TUNNEL_URL_FILE):
-        try:
-            with open(TUNNEL_URL_FILE, "r", encoding="utf-8") as f:
-                return f.read().strip()
-        except Exception:
-            pass
-    return os.environ.get("PUBLIC_HTTPS_URL", "").strip()
 
 
 def ensure_self_signed_cert() -> bool:
@@ -342,7 +408,10 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
-    # Arka planda HTTPS sunucusunu da başlat (mobil tarayıcı mikrofon izni için)
+    # Mobil cihazlar için sıfır uyarılı Cloudflare HTTPS tünelini başlat
+    start_cloudflared_tunnel_async(args.port)
+
+    # Arka planda yerel HTTPS sunucusunu da başlat (yedek)
     https_thread = threading.Thread(target=start_https_server, args=(args.https_port,), daemon=True)
     https_thread.start()
 

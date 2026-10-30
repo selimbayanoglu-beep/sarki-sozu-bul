@@ -95,15 +95,23 @@
   let serverStatus = { https_port: 8892, tunnel_url: "" };
 
   async function checkServerAndHttps() {
-    try {
-      const res = await fetch("/api/status");
-      const data = await res.json();
-      if (data && data.ok) {
-        serverStatus = data;
-      }
-    } catch (_) {
-      // Sunucu durum kontrolü sessizce geçilir
+    async function fetchStatus() {
+      try {
+        const res = await fetch("/api/status");
+        const data = await res.json();
+        if (data && data.ok) {
+          serverStatus = data;
+          if (data.tunnel_url) {
+            httpsRedirectLink.href = data.tunnel_url;
+            httpsRedirectLink.textContent = "🔒 Canlı Mikrofon İçin Aç (HTTPS)";
+            return true;
+          }
+        }
+      } catch (_) {}
+      return false;
     }
+
+    const hasTunnel = await fetchStatus();
 
     const isLocal =
       location.hostname === "localhost" ||
@@ -112,12 +120,14 @@
 
     if (!isSecure) {
       httpsBanner.classList.remove("hidden");
-      if (serverStatus.tunnel_url) {
-        httpsRedirectLink.href = serverStatus.tunnel_url;
-        httpsRedirectLink.textContent = "🔒 Güvenli (HTTPS) Bağlantıyı Aç";
-      } else {
-        const targetPort = serverStatus.https_port || 8892;
-        httpsRedirectLink.href = `https://${location.hostname}:${targetPort}${location.pathname}`;
+      if (!hasTunnel) {
+        // Tünel hazırlanıyorsa 2 sn aralıklarla kontrol et
+        let attempts = 0;
+        const interval = setInterval(async () => {
+          attempts++;
+          const found = await fetchStatus();
+          if (found || attempts >= 8) clearInterval(interval);
+        }, 2000);
       }
     }
   }
@@ -327,8 +337,11 @@
   // Tek Tuşla Bulana Kadar Dinlemeyi Başlat
   async function startListening() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      // HTTP ortamında (veya Safari kısıtlamasında) canlı mikrofon akışı engelliyse
-      // kullanıcıyı bekletmeden doğrudan telefonun yerel ses kaydedicisini aç
+      if (serverStatus && serverStatus.tunnel_url) {
+        statusMessage.textContent = "🔒 Canlı mikrofon için güvenli HTTPS adresine geçiliyor...";
+        location.href = serverStatus.tunnel_url;
+        return;
+      }
       statusMessage.textContent = "🎙️ Telefon mikrofonu açılıyor, 4-5 saniye müziği kaydedip 'Bitti' deyin...";
       nativeAudioInput.click();
       return;
