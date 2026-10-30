@@ -1,0 +1,160 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
+  <meta name="theme-color" content="#090a10" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+  <title>Şarkı Sözü Bul — Bar & Canlı Müzik Eşlikçisi</title>
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" type="image/svg+xml" href="icon.svg" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <div class="app-shell">
+    <!-- Üst Bilgi & Durum Çubuğu -->
+    <header class="top-bar">
+      <div class="brand">
+        <div class="brand-logo" aria-hidden="true">🎵</div>
+        <div>
+          <h1 class="brand-title">Şarkı Sözü Bul</h1>
+          <p class="brand-subtitle">4 Katmanlı Müzik &amp; Vokal Tanıma</p>
+        </div>
+      </div>
+      <div class="top-actions">
+        <button id="btnHistory" class="icon-btn" title="Bulunan Şarkılar Geçmişi">
+          <span>🕘</span>
+          <span class="btn-label">Geçmiş</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- HTTPS Mikrofon Uyarısı (Sadece HTTP bağlantıda ve mikrofon engellendiğinde görünür) -->
+    <div id="httpsBanner" class="https-banner hidden">
+      <div class="https-banner-text">
+        <strong>🔒 Telefon Mikrofonu İçin Güvenli Bağlantı:</strong>
+        <span>Tarayıcınız kesintisiz canlı dinleme için HTTPS bağlantısı ister.</span>
+      </div>
+      <div class="https-banner-actions">
+        <a id="httpsRedirectLink" href="#" class="https-btn">🔒 Güvenli (HTTPS) Adrese Geç</a>
+        <button id="btnNativeMicFallback" class="https-btn secondary">🎙️ Doğrudan Ses Kaydet</button>
+      </div>
+    </div>
+
+    <!-- Yedek Native Mikrofon Input (HTTP ortamları için görünmez yedek) -->
+    <input id="nativeAudioInput" type="file" accept="audio/*,video/*" capture="microphone" class="hidden" />
+
+    <!-- Ana Dinleme Küresi (Tek Tuşla Bulana Kadar Dinle) -->
+    <section id="listenSection" class="listen-section">
+      <div class="listen-orb-wrapper">
+        <canvas id="waveCanvas" width="320" height="320" class="wave-canvas"></canvas>
+        <button id="btnListen" class="listen-orb" type="button" aria-label="Müziği Dinle ve Sözleri Getir">
+          <span id="orbIcon" class="orb-icon">🎧</span>
+          <span id="orbMainText" class="orb-main-text">DOKUN &amp; DİNLET</span>
+          <span id="orbSubText" class="orb-sub-text">Bulana kadar otomatik dinler</span>
+        </button>
+      </div>
+
+      <!-- Canlı Dalga ve Katman İlerleme Göstergesi -->
+      <div id="listenStatusPanel" class="listen-status-panel">
+        <div class="wave-steps">
+          <span id="stepLayer1" class="step-pill">1. Bar Bas Filtresi</span>
+          <span id="stepLayer2" class="step-pill">2. Çoklu Ses İzi</span>
+          <span id="stepLayer3" class="step-pill">3. DJ Pitch ±%3.5</span>
+          <span id="stepLayer4" class="step-pill">4. AI Vokal Dinleme</span>
+        </div>
+        <p id="statusMessage" class="status-message">
+          Barda çalan Türkçe veya yabancı parçaya telefonu tutun ve tek tuşa basın.
+        </p>
+        <div id="detectedWordsBox" class="detected-words-box hidden">
+          <span class="detected-label">🎤 Müzikten Duyulan:</span>
+          <span id="detectedWordsText" class="detected-text"></span>
+        </div>
+      </div>
+
+      <!-- Hızlı Söz / İsim Arama Çubuğu (İsteğe Bağlı) -->
+      <form id="searchForm" class="quick-search-bar">
+        <input
+          id="searchInput"
+          type="text"
+          placeholder="Veya duyduğun 2-3 kelimeyi / şarkı adını yaz..."
+          autocomplete="off"
+        />
+        <button type="submit" id="btnSearch" class="search-submit-btn">Bul</button>
+      </form>
+    </section>
+
+    <!-- Şarkı Sözü & Canlı Karaoke Sahne Ekranı -->
+    <section id="lyricsSection" class="lyrics-section hidden">
+      <!-- Şarkı Başlığı ve Kontroller -->
+      <div class="track-header">
+        <div class="track-meta">
+          <img id="trackCover" src="icon.svg" alt="Kapak" class="track-cover" />
+          <div class="track-info">
+            <div class="track-badges">
+              <span id="badgeLayer" class="badge badge-layer">4 Katmanlı Motor</span>
+              <span id="badgeSync" class="badge badge-sync">Canlı Senkron</span>
+            </div>
+            <h2 id="trackTitle" class="track-title">Şarkı Adı</h2>
+            <p id="trackArtist" class="track-artist">Sanatçı</p>
+          </div>
+        </div>
+
+        <div class="stage-controls">
+          <button id="btnListenAgain" class="ctrl-btn primary-ctrl" type="button">
+            🎧 Yeni Şarkı Dinle
+          </button>
+          <button id="btnTranslate" class="ctrl-btn" type="button" title="Yabancı şarkıların Türkçe çevirisini satır altında göster">
+            🇹🇷 Türkçe Çeviri
+          </button>
+          <button id="btnAutoScroll" class="ctrl-btn active" type="button" title="Canlı Otomatik Kaydırma">
+            ⚡ Otomatik Akış
+          </button>
+          <div class="font-controls">
+            <button id="btnFontDown" class="ctrl-btn small-ctrl" type="button" title="Yazıyı Küçült">A-</button>
+            <button id="btnFontUp" class="ctrl-btn small-ctrl" type="button" title="Yazıyı Büyüt">A+</button>
+          </div>
+        </div>
+
+        <!-- Senkronize Karaoke Zaman İnce Ayar Çubuğu -->
+        <div id="syncToolbar" class="sync-toolbar hidden">
+          <div class="sync-time-display">
+            <span class="live-dot"></span>
+            <span id="syncTimerText">00:00</span>
+            <span class="sync-hint">(Bir satıra dokunarak o saniyeye hizalayabilirsiniz)</span>
+          </div>
+          <div class="sync-offset-btns">
+            <button id="btnSyncBack" class="sync-adj-btn" type="button">-1.5 sn</button>
+            <button id="btnSyncPause" class="sync-adj-btn" type="button">⏸ Duraklat</button>
+            <button id="btnSyncForward" class="sync-adj-btn" type="button">+1.5 sn</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Şarkı Sözleri Akış Alanı -->
+      <div id="lyricsContainer" class="lyrics-container">
+        <div id="lyricsLines" class="lyrics-lines"></div>
+      </div>
+    </section>
+
+    <!-- Geçmiş Şarkılar Çekmecesi (Modal) -->
+    <div id="historyModal" class="modal-backdrop hidden">
+      <div class="modal-panel">
+        <div class="modal-header">
+          <h3>🕘 Bulunan Şarkılar Geçmişi</h3>
+          <div class="modal-header-btns">
+            <button id="btnClearHistory" class="text-danger-btn" type="button">Temizle</button>
+            <button id="btnCloseHistory" class="icon-close-btn" type="button">✕</button>
+          </div>
+        </div>
+        <div id="historyList" class="history-list">
+          <p class="empty-state">Henüz dinlenen şarkı yok.</p>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>

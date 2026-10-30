@@ -1,0 +1,17 @@
+{
+  "name": "Şarkı Sözü Bul — Bar & Canlı Müzik Eşlikçisi",
+  "short_name": "Şarkı Sözü Bul",
+  "description": "Barda çalan Türkçe veya yabancı parçayı müziğinden tanır ve canlı senkronize sözlerini getirir.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#07080d",
+  "theme_color": "#07080d",
+  "icons": [
+    {
+      "src": "icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

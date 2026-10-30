@@ -1,0 +1,3 @@
+shazamio>=0.6.0
+SpeechRecognition>=3.10.0
+certifi>=2024.2.2
