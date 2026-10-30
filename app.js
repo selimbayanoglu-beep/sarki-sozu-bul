@@ -327,9 +327,10 @@
   // Tek Tuşla Bulana Kadar Dinlemeyi Başlat
   async function startListening() {
     if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-      httpsBanner.classList.remove("hidden");
-      statusMessage.textContent =
-        "Canlı mikrofon için yukarıdaki sarı 'Güvenli (HTTPS) Adrese Geç' butonuna dokunun veya 'Doğrudan Ses Kaydet'i kullanın.";
+      // HTTP ortamında (veya Safari kısıtlamasında) canlı mikrofon akışı engelliyse
+      // kullanıcıyı bekletmeden doğrudan telefonun yerel ses kaydedicisini aç
+      statusMessage.textContent = "🎙️ Telefon mikrofonu açılıyor, 4-5 saniye müziği kaydedip 'Bitti' deyin...";
+      nativeAudioInput.click();
       return;
     }
 

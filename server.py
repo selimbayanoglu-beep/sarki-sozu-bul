@@ -272,6 +272,41 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                 self._send_json({"ok": False, "error": f"Çeviri hatası: {exc}"}, 500)
             return
 
+        if path == "/api/pull-github":
+            try:
+                import urllib.request as ureq
+                files_to_sync = [
+                    "index.html",
+                    "style.css",
+                    "app.js",
+                    "server.py",
+                    "recognition_engine.py",
+                    "lyrics_engine.py",
+                    "icon.svg",
+                    "manifest.json",
+                    "requirements.txt",
+                ]
+                repo_base = "https://raw.githubusercontent.com/selimbayanoglu-beep/sarki-sozu-bul/main/"
+                updated_files = []
+                errors = []
+                for fname in files_to_sync:
+                    try:
+                        url = f"{repo_base}{fname}?t={int(datetime.datetime.now().timestamp())}"
+                        req = ureq.Request(url, headers={"Cache-Control": "no-cache", "User-Agent": "Mozilla/5.0"})
+                        with ureq.urlopen(req, timeout=12) as resp:
+                            data = resp.read()
+                        if data:
+                            target_path = os.path.join(BASE_DIR, fname)
+                            with open(target_path, "wb") as f:
+                                f.write(data)
+                            updated_files.append(fname)
+                    except Exception as exc:
+                        errors.append(f"{fname}: {exc}")
+                self._send_json({"ok": len(errors) == 0, "updated": updated_files, "errors": errors})
+            except Exception as e:
+                self._send_json({"ok": False, "error": str(e)}, 500)
+            return
+
         self._send_json({"ok": False, "error": "Bilinmeyen uç nokta"}, 404)
 
 
