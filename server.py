@@ -368,6 +368,15 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                             updated_files.append(fname)
                     except Exception as exc:
                         errors.append(f"{fname}: {exc}")
+
+                # Bellekteki motorları anında yeniden yükle
+                try:
+                    import importlib
+                    importlib.reload(lyrics_engine)
+                    importlib.reload(recognition_engine)
+                except Exception:
+                    pass
+
                 self._send_json({"ok": len(errors) == 0, "updated": updated_files, "errors": errors})
             except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, 500)

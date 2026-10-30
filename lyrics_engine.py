@@ -252,24 +252,50 @@ def search_lyrics_ovh(title: str, artist: str) -> Optional[Dict[str, Any]]:
 
 
 def _scrape_genius_page_lyrics(url: str) -> Optional[str]:
-    """Genius şarkı sayfasından sözleri ayıklar."""
+    """Genius şarkı sayfasından sözleri temiz ve eksiksiz ayıklar."""
     try:
         page_html = _http_get_text(url, timeout=6.0)
-        containers = re.findall(
-            r'<div[^>]+data-lyrics-container="true"[^>]*>(.*?)</div>',
-            page_html,
-            flags=re.DOTALL | re.IGNORECASE,
-        )
-        if not containers:
-            return None
         chunks = []
-        for c in containers:
-            text = re.sub(r"<br\s*/?>", "\n", c, flags=re.IGNORECASE)
-            text = re.sub(r"<[^>]+>", "", text)
-            text = html.unescape(text)
-            chunks.append(text.strip())
-        full_text = "\n\n".join(chunks).strip()
-        return full_text if len(full_text) > 30 else None
+        pos = 0
+        while True:
+            idx = page_html.find('data-lyrics-container="true"', pos)
+            if idx == -1:
+                break
+            tag_end = page_html.find(">", idx)
+            if tag_end == -1:
+                break
+            open_divs = 1
+            curr = tag_end + 1
+            while open_divs > 0 and curr < len(page_html):
+                next_open = page_html.find("<div", curr)
+                next_close = page_html.find("</div>", curr)
+                if next_close == -1:
+                    break
+                if next_open != -1 and next_open < next_close:
+                    open_divs += 1
+                    curr = next_open + 4
+                else:
+                    open_divs -= 1
+                    if open_divs == 0:
+                        chunk = page_html[tag_end + 1:next_close]
+                        chunks.append(chunk)
+                        pos = next_close + 6
+                        break
+                    curr = next_close + 6
+            if open_divs != 0:
+                break
+
+        if not chunks:
+            return None
+
+        full = "\n\n".join(chunks)
+        full = re.sub(r"<br\s*/?>", "\n", full, flags=re.IGNORECASE)
+        full = re.sub(r"<[^>]+>", "", full)
+        full = html.unescape(full)
+        # Başlıktaki reklam ve katkıda bulunanlar çöpünü temizle
+        full = re.sub(r"^\s*\d+\s+Contributors.*?(?:Read More|\n\[|\bLyrics\b)", "", full, flags=re.DOTALL).strip()
+        full = re.sub(r"\d*Embed$", "", full).strip()
+        return full if len(full) > 30 else None
     except Exception:
         return None
 
@@ -411,10 +437,14 @@ def get_full_lyrics_for_track(
     if offset_seconds is not None and result.get("synced") and result.get("lines"):
         for idx, line in enumerate(result["lines"]):
             t = line.get("time")
-            if t is not None and t <= offset_seconds + 0.8:
+            if t is not None and t <= offset_seconds + 0.5:
                 matched_idx = idx
-            elif t is not None and t > offset_seconds + 0.8:
+            elif t is not None and t > offset_seconds + 0.5:
                 break
+    elif offset_seconds is not None and not result.get("synced") and result.get("lines"):
+        total_d = result.get("duration") or 210.0
+        ratio = max(0.0, min(0.95, offset_seconds / total_d))
+        matched_idx = int(len(result["lines"]) * ratio)
     elif matched_snippet and result.get("lines"):
         matched_idx, inferred_time = find_matching_line_index(result["lines"], matched_snippet)
         if offset_seconds is None and inferred_time is not None:

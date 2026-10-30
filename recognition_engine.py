@@ -331,14 +331,16 @@ async def recognize_music_pipeline(
             _EXECUTOR, prepare_dsp_variants, raw_path, work_dir, wave
         )
 
-        # KATMAN 2 ve KATMAN 3'ü paralel başlatabiliriz (Dalga >= 2 ise ikisi aynı anda koşar,
-        # Dalga 1'de önce hızlı ses izi, bulamazsa anında AI vokal devreye girer)
+        # Dalga 1'de önce ışık hızında parmak izini dene (800ms).
+        # Bulunamazsa veya Dalga >= 2 ise AI Vokal dinleme de devreye girsin.
         fp_task = asyncio.create_task(run_layer2_fingerprinting(variants))
-        vocal_task = asyncio.create_task(run_layer3_vocal_lyrics_extraction(variants, preferred_lang))
+        vocal_task = None
+        if wave >= 2:
+            vocal_task = asyncio.create_task(run_layer3_vocal_lyrics_extraction(variants, preferred_lang))
 
         fp_result = await fp_task
         if fp_result and fp_result.get("title"):
-            if not vocal_task.done():
+            if vocal_task and not vocal_task.done():
                 vocal_task.cancel()
 
             # KATMAN 4: Tam Şarkı Sözlerini ve Senkronize Karaoke Satırlarını Getir
@@ -367,13 +369,15 @@ async def recognize_music_pipeline(
             full_lyrics["elapsed_ms"] = int((time.time() - start_time) * 1000)
             return full_lyrics
 
-        # Ses izi bulamadıysa Katman 3 (AI Vokalden Söz Yakalama) sonucunu al
-        vocal_result = await vocal_task
-        if vocal_result and not vocal_result.get("partial_vocal_only") and vocal_result.get("title"):
-            vocal_result["recognized"] = True
-            vocal_result["wave"] = wave
-            vocal_result["elapsed_ms"] = int((time.time() - start_time) * 1000)
-            return vocal_result
+        # Ses izi bulamadıysa (Dalga >= 2) Katman 3 (AI Vokalden Söz Yakalama) sonucunu al
+        vocal_result = None
+        if vocal_task:
+            vocal_result = await vocal_task
+            if vocal_result and not vocal_result.get("partial_vocal_only") and vocal_result.get("title"):
+                vocal_result["recognized"] = True
+                vocal_result["wave"] = wave
+                vocal_result["elapsed_ms"] = int((time.time() - start_time) * 1000)
+                return vocal_result
 
         detected_words = []
         if vocal_result and vocal_result.get("detected_phrases"):

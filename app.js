@@ -52,9 +52,11 @@
 
   const syncToolbar = document.getElementById("syncToolbar");
   const syncTimerText = document.getElementById("syncTimerText");
-  const btnSyncBack = document.getElementById("btnSyncBack");
+  const btnSyncBack1 = document.getElementById("btnSyncBack1");
+  const btnSyncBack05 = document.getElementById("btnSyncBack05");
   const btnSyncPause = document.getElementById("btnSyncPause");
-  const btnSyncForward = document.getElementById("btnSyncForward");
+  const btnSyncForward05 = document.getElementById("btnSyncForward05");
+  const btnSyncForward1 = document.getElementById("btnSyncForward1");
 
   const lyricsContainer = document.getElementById("lyricsContainer");
   const lyricsLines = document.getElementById("lyricsLines");
@@ -309,10 +311,13 @@
         }
 
         if (res.recognized && res.title) {
-          // ŞARKI BULUNDU! Gecikme telafisini hesapla
+          // ŞARKI BULUNDU! Gecikme telafisini tam ve doğru hesapla:
+          // Shazam'ın döndürdüğü offset, gönderilen ses kesitinin BAŞLANGIÇ saniyesidir.
+          // O kesitin başından cevabın geldiği şu ana kadar geçen toplam süre: durationSec + latencySec
           const latencySec = (performance.now() - waveCapturedAt) / 1000.0;
+          const totalElapsed = durationSec + latencySec;
           if (typeof res.offset_seconds === "number") {
-            res.offset_seconds = Math.max(0, res.offset_seconds + latencySec);
+            res.offset_seconds = Math.max(0, res.offset_seconds + totalElapsed);
           }
           stopListening(true);
           if (navigator.vibrate) {
@@ -405,13 +410,13 @@
 
     drawVisualizer();
 
-    // Kayan Pencere Dalga Zamanlayıcıları (Şarkıyı bulduğu anda otomatik durur)
+    // Kayan Pencere Dalga Zamanlayıcıları (Işık hızında ilk tespit için 1.8 sn'de başlar)
     waveTimers = [
-      setTimeout(() => sendAudioWave(1, 3.6), 3400),
-      setTimeout(() => sendAudioWave(2, 6.6), 6800),
-      setTimeout(() => sendAudioWave(3, 7.5), 10500),
-      setTimeout(() => sendAudioWave(4, 8.0), 14500),
-      setTimeout(() => sendAudioWave(5, 8.5), 18500),
+      setTimeout(() => sendAudioWave(1, 2.2), 1800),
+      setTimeout(() => sendAudioWave(2, 4.2), 4000),
+      setTimeout(() => sendAudioWave(3, 6.5), 6800),
+      setTimeout(() => sendAudioWave(4, 7.5), 10500),
+      setTimeout(() => sendAudioWave(5, 8.5), 14500),
     ];
   }
 
@@ -722,18 +727,17 @@
     document.documentElement.style.setProperty("--lyric-font-size", `${fontSizeRem}rem`);
   });
 
-  // Zaman İnce Ayar Kontrolleri (-1.5sn / Duraklat / +1.5sn)
-  btnSyncBack.addEventListener("click", () => {
-    syncBaseOffsetSec = Math.max(0, getCurrentPlaybackSec() - 1.5);
+  // Zaman İnce Ayar Kontrolleri (-1s / -0.5s / Duraklat / +0.5s / +1s)
+  function adjustSync(deltaSec) {
+    syncBaseOffsetSec = Math.max(0, getCurrentPlaybackSec() + deltaSec);
     syncStartPerfTime = performance.now();
     updateSyncedHighlight();
-  });
+  }
 
-  btnSyncForward.addEventListener("click", () => {
-    syncBaseOffsetSec = getCurrentPlaybackSec() + 1.5;
-    syncStartPerfTime = performance.now();
-    updateSyncedHighlight();
-  });
+  if (btnSyncBack1) btnSyncBack1.addEventListener("click", () => adjustSync(-1.0));
+  if (btnSyncBack05) btnSyncBack05.addEventListener("click", () => adjustSync(-0.5));
+  if (btnSyncForward05) btnSyncForward05.addEventListener("click", () => adjustSync(0.5));
+  if (btnSyncForward1) btnSyncForward1.addEventListener("click", () => adjustSync(1.0));
 
   btnSyncPause.addEventListener("click", () => {
     if (!syncPaused) {
