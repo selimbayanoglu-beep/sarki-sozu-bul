@@ -101,24 +101,26 @@ def _run_ffmpeg(input_path: str, output_path: str, audio_filter: Optional[str] =
 def prepare_dsp_variants(raw_audio_path: str, work_dir: str, wave: int = 1) -> Dict[str, str]:
     """
     Katman 1: Bar ortamındaki kayıttan farklı DSP filtreli ses varyasyonları üretir.
+    Akustik parmak izini bozan yıkıcı filtreler (afftdn vb.) kullanılmaz;
+    yalnızca sub-bass gürültü kesme ve dinamik ses normalizasyonu uygulanır.
     """
     variants: Dict[str, str] = {"raw": raw_audio_path}
     if not FFMPEG_BIN:
         return variants
 
-    # 1. Bar Gürültü & Subwoofer Bas Temizleme + Dinamik Ses Dengeleme
-    clean_bar_path = os.path.join(work_dir, "clean_bar.wav")
-    bar_filter = "highpass=f=130,lowpass=f=6800,afftdn=nf=-25,dynaudnorm=f=150:g=15"
-    if _run_ffmpeg(raw_audio_path, clean_bar_path, bar_filter, sample_rate=44100):
-        variants["clean_bar"] = clean_bar_path
+    # 1. Ses Dengeleme & Temizleme (Subwoofer gürültüsünü keser, ses seviyesini dengeler, müzik frekanslarını korur)
+    norm_path = os.path.join(work_dir, "normalized.wav")
+    norm_filter = "highpass=f=80,dynaudnorm=f=120:g=15"
+    if _run_ffmpeg(raw_audio_path, norm_path, norm_filter, sample_rate=44100):
+        variants["normalized"] = norm_path
 
-    # 2. Vokal Öne Çıkarma (Şarkıcının sesini müziğin içinden ayıklamak için 16kHz WAV)
+    # 2. Vokal Öne Çıkarma (Şarkıcının sözlerini Speech-to-Text motoruna iletmek için 16kHz WAV)
     vocal_path = os.path.join(work_dir, "vocal_boost.wav")
     vocal_filter = (
-        "highpass=f=220,lowpass=f=3600,"
-        "equalizer=f=1100:t=q:w=1.2:g=7,"
-        "equalizer=f=2500:t=q:w=1.2:g=6,"
-        "afftdn=nf=-20,dynaudnorm=f=120:g=15"
+        "highpass=f=180,lowpass=f=4200,"
+        "equalizer=f=1200:t=q:w=1.2:g=6,"
+        "equalizer=f=2600:t=q:w=1.2:g=5,"
+        "dynaudnorm=f=120:g=15"
     )
     if _run_ffmpeg(raw_audio_path, vocal_path, vocal_filter, sample_rate=16000):
         variants["vocal_boost"] = vocal_path
@@ -127,13 +129,13 @@ def prepare_dsp_variants(raw_audio_path: str, work_dir: str, wave: int = 1) -> D
     if wave >= 2:
         pitch_down_path = os.path.join(work_dir, "pitch_down.wav")
         # DJ şarkıyı %3.5 hızlandırdıysa normale döndürür
-        pitch_down_filter = "asetrate=44100*0.965,aresample=44100,highpass=f=130,dynaudnorm=f=150:g=15"
+        pitch_down_filter = "asetrate=44100*0.965,aresample=44100,highpass=f=80,dynaudnorm=f=120:g=15"
         if _run_ffmpeg(raw_audio_path, pitch_down_path, pitch_down_filter, sample_rate=44100):
             variants["pitch_down"] = pitch_down_path
 
         pitch_up_path = os.path.join(work_dir, "pitch_up.wav")
         # DJ şarkıyı %3.5 yavaşlattıysa normale döndürür
-        pitch_up_filter = "asetrate=44100*1.035,aresample=44100,highpass=f=130,dynaudnorm=f=150:g=15"
+        pitch_up_filter = "asetrate=44100*1.035,aresample=44100,highpass=f=80,dynaudnorm=f=120:g=15"
         if _run_ffmpeg(raw_audio_path, pitch_up_path, pitch_up_filter, sample_rate=44100):
             variants["pitch_up"] = pitch_up_path
 
@@ -193,8 +195,8 @@ async def run_layer2_fingerprinting(variants: Dict[str, str]) -> Optional[Dict[s
     if not HAS_SHAZAMIO:
         return None
 
-    # Öncelik sırası: Bar filtresi -> Ham ses -> Pitch Down -> Pitch Up
-    ordered_keys = [k for k in ("clean_bar", "raw", "pitch_down", "pitch_up") if k in variants]
+    # Öncelik sırası: Ham ses ve normalizasyon eşzamanlı -> Pitch Down -> Pitch Up
+    ordered_keys = [k for k in ("raw", "normalized", "pitch_down", "pitch_up") if k in variants]
     if not ordered_keys:
         return None
 
@@ -331,12 +333,9 @@ async def recognize_music_pipeline(
             _EXECUTOR, prepare_dsp_variants, raw_path, work_dir, wave
         )
 
-        # Dalga 1'de önce ışık hızında parmak izini dene (800ms).
-        # Bulunamazsa veya Dalga >= 2 ise AI Vokal dinleme de devreye girsin.
+        # KATMAN 2 (Akustik Ses İzi) ve KATMAN 3 (AI Vokal Söz Dinleme) paralel başlar
         fp_task = asyncio.create_task(run_layer2_fingerprinting(variants))
-        vocal_task = None
-        if wave >= 2:
-            vocal_task = asyncio.create_task(run_layer3_vocal_lyrics_extraction(variants, preferred_lang))
+        vocal_task = asyncio.create_task(run_layer3_vocal_lyrics_extraction(variants, preferred_lang))
 
         fp_result = await fp_task
         if fp_result and fp_result.get("title"):
@@ -356,7 +355,7 @@ async def recognize_music_pipeline(
             )
 
             variant_map = {
-                "clean_bar": "Katman 1+2: Bar Bas/Gürültü Filtreli Ses İzi",
+                "normalized": "Katman 1+2: Akustik Dengelemeli Ses İzi",
                 "raw": "Katman 2: Doğrudan Ses İzi",
                 "pitch_down": "Katman 1+2: DJ Hız/Pitch Düzeltmeli (-3.5%) Ses İzi",
                 "pitch_up": "Katman 1+2: DJ Hız/Pitch Düzeltmeli (+3.5%) Ses İzi",
@@ -369,10 +368,13 @@ async def recognize_music_pipeline(
             full_lyrics["elapsed_ms"] = int((time.time() - start_time) * 1000)
             return full_lyrics
 
-        # Ses izi bulamadıysa (Dalga >= 2) Katman 3 (AI Vokalden Söz Yakalama) sonucunu al
+        # Ses izi bulamadıysa Katman 3 (AI Vokalden Söz Yakalama) sonucunu al
         vocal_result = None
         if vocal_task:
-            vocal_result = await vocal_task
+            try:
+                vocal_result = await vocal_task
+            except asyncio.CancelledError:
+                pass
             if vocal_result and not vocal_result.get("partial_vocal_only") and vocal_result.get("title"):
                 vocal_result["recognized"] = True
                 vocal_result["wave"] = wave

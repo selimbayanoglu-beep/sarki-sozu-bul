@@ -354,10 +354,40 @@ html, body {
   backdrop-filter: blur(16px);
 }
 
+.track-header-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
 .track-meta {
   display: flex;
   align-items: center;
   gap: 13px;
+  flex: 1;
+  min-width: 0;
+}
+
+.btn-close-lyrics {
+  background: rgba(255, 61, 113, 0.12);
+  color: #ff4d6d;
+  border: 1px solid rgba(255, 61, 113, 0.35);
+  padding: 8px 14px;
+  border-radius: 12px;
+  font-size: 0.85rem;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+  flex-shrink: 0;
+  transition: all 0.2s ease;
+}
+
+.btn-close-lyrics:hover,
+.btn-close-lyrics:active {
+  background: #ff3d71;
+  color: #ffffff;
+  transform: scale(0.97);
 }
 
 .track-cover {
@@ -440,6 +470,17 @@ html, body {
   background: linear-gradient(135deg, #ff3d71 0%, #ff6b4a 100%);
   color: #ffffff;
   border: none;
+}
+
+.ctrl-btn.danger-ctrl {
+  background: rgba(255, 61, 113, 0.14);
+  color: #ff5277;
+  border: 1px solid rgba(255, 61, 113, 0.4);
+}
+
+.ctrl-btn.danger-ctrl:active {
+  background: #ff3d71;
+  color: #fff;
 }
 
 .ctrl-btn.active {

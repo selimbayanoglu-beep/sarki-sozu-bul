@@ -43,8 +43,10 @@
   const badgeSync = document.getElementById("badgeSync");
   const trackTitle = document.getElementById("trackTitle");
   const trackArtist = document.getElementById("trackArtist");
+  const btnCloseLyrics = document.getElementById("btnCloseLyrics");
 
   const btnListenAgain = document.getElementById("btnListenAgain");
+  const btnStopSync = document.getElementById("btnStopSync");
   const btnTranslate = document.getElementById("btnTranslate");
   const btnAutoScroll = document.getElementById("btnAutoScroll");
   const btnFontDown = document.getElementById("btnFontDown");
@@ -86,6 +88,7 @@
   let showTranslation = false;
   let autoScrollEnabled = true;
   let syncPaused = false;
+  let isSongFinished = false;
   let syncStartPerfTime = 0;
   let syncBaseOffsetSec = 0;
   let syncIntervalId = null;
@@ -149,17 +152,9 @@
     stepLayer4.classList.remove("active");
   }
 
-  // Float32 PCM dizisini 16-bit standart WAV Blob'una dönüştürür
+  // Float32 PCM dizisini 16-bit standart WAV Blob'una dönüştürür (Kayıpsız ve parmak izi frekanslarını tam koruyarak)
   function encodeWAV(samples, rate) {
-    const targetRate = 22050; // Hızlı yükleme ve net vokal/parmak izi için 22.05kHz mono PCM
-    const ratio = rate / targetRate;
-    const newLength = Math.floor(samples.length / ratio);
-    const downsampled = new Float32Array(newLength);
-    for (let i = 0; i < newLength; i++) {
-      downsampled[i] = samples[Math.floor(i * ratio)];
-    }
-
-    const buffer = new ArrayBuffer(44 + downsampled.length * 2);
+    const buffer = new ArrayBuffer(44 + samples.length * 2);
     const view = new DataView(buffer);
 
     function writeString(offset, str) {
@@ -169,22 +164,22 @@
     }
 
     writeString(0, "RIFF");
-    view.setUint32(4, 36 + downsampled.length * 2, true);
+    view.setUint32(4, 36 + samples.length * 2, true);
     writeString(8, "WAVE");
     writeString(12, "fmt ");
     view.setUint32(16, 16, true); // PCM chunk size
-    view.setUint16(20, 1, true);  // PCM format
+    view.setUint16(20, 1, true);  // PCM format (uncompressed)
     view.setUint16(22, 1, true);  // Mono
-    view.setUint32(24, targetRate, true);
-    view.setUint32(28, targetRate * 2, true);
-    view.setUint16(32, 2, true);
-    view.setUint16(34, 16, true);
+    view.setUint32(24, rate, true);
+    view.setUint32(28, rate * 2, true); // Byte rate (rate * 1 channel * 2 bytes)
+    view.setUint16(32, 2, true);        // Block align
+    view.setUint16(34, 16, true);       // Bits per sample
     writeString(36, "data");
-    view.setUint32(40, downsampled.length * 2, true);
+    view.setUint32(40, samples.length * 2, true);
 
     let offset = 44;
-    for (let i = 0; i < downsampled.length; i++, offset += 2) {
-      const s = Math.max(-1, Math.min(1, downsampled[i]));
+    for (let i = 0; i < samples.length; i++, offset += 2) {
+      const s = Math.max(-1, Math.min(1, samples[i]));
       view.setInt16(offset, s < 0 ? s * 0x8000 : s * 0x7fff, true);
     }
 
@@ -353,13 +348,13 @@
     }
 
     try {
-      // ÖNEMLİ: Telefonun müziği "arka plan gürültüsü" sanıp silmemesi için
-      // echoCancellation, noiseSuppression ve autoGainControl KAPALI tutulur!
+      // Bar ortamında uzaktaki müziği net yakalayabilmek için autoGainControl AÇIK,
+      // ancak müziği gürültü sanıp boğmaması için echoCancellation & noiseSuppression KAPALI tutulur.
       mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           echoCancellation: false,
           noiseSuppression: false,
-          autoGainControl: false,
+          autoGainControl: true,
           channelCount: 1,
         },
       });
@@ -386,6 +381,11 @@
 
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
     audioCtx = new AudioContextClass();
+    if (audioCtx.state === "suspended") {
+      try {
+        await audioCtx.resume();
+      } catch (_) {}
+    }
     sampleRate = audioCtx.sampleRate || 44100;
 
     sourceNode = audioCtx.createMediaStreamSource(mediaStream);
@@ -410,13 +410,13 @@
 
     drawVisualizer();
 
-    // Kayan Pencere Dalga Zamanlayıcıları (Işık hızında ilk tespit için 1.8 sn'de başlar)
+    // Kayan Pencere Dalga Zamanlayıcıları (Shazam'ın yüksek güvenilirlikle eşleşmesi için en az 3.8s kesit)
     waveTimers = [
-      setTimeout(() => sendAudioWave(1, 2.2), 1800),
-      setTimeout(() => sendAudioWave(2, 4.2), 4000),
-      setTimeout(() => sendAudioWave(3, 6.5), 6800),
-      setTimeout(() => sendAudioWave(4, 7.5), 10500),
-      setTimeout(() => sendAudioWave(5, 8.5), 14500),
+      setTimeout(() => sendAudioWave(1, 3.8), 3400),
+      setTimeout(() => sendAudioWave(2, 5.5), 6200),
+      setTimeout(() => sendAudioWave(3, 7.5), 9800),
+      setTimeout(() => sendAudioWave(4, 9.5), 13800),
+      setTimeout(() => sendAudioWave(5, 12.0), 18000),
     ];
   }
 
@@ -603,6 +603,20 @@
     syncTimerText.textContent = formatTime(nowSec);
 
     const lines = currentSong.lines;
+    const lastLine = lines[lines.length - 1];
+    const lastLineTime = (lastLine && typeof lastLine.time === "number") ? lastLine.time : (currentSong.duration || 240);
+
+    // Şarkı tamamlandıysa (son satırdan 6 saniye sonra veya süre aşıldığında) akışı durdur
+    if (nowSec >= lastLineTime + 6) {
+      isSongFinished = true;
+      stopKaraokeSync();
+      syncTimerText.textContent = `${formatTime(lastLineTime)} (Tamamlandı)`;
+      btnSyncPause.textContent = "🔄 Baştan";
+      if (btnStopSync) btnStopSync.textContent = "🔄 Baştan";
+      highlightLineByIndex(lines.length - 1, true);
+      return;
+    }
+
     let foundIdx = -1;
     for (let i = 0; i < lines.length; i++) {
       const t = lines[i].time;
@@ -622,7 +636,9 @@
     stopKaraokeSync();
     activeLineIdx = -1;
     syncPaused = false;
+    isSongFinished = false;
     btnSyncPause.textContent = "⏸ Duraklat";
+    if (btnStopSync) btnStopSync.textContent = "⏹️ Akışı Durdur";
 
     if (!currentSong || !currentSong.lines || currentSong.lines.length === 0) {
       return;
@@ -654,10 +670,18 @@
       // ve her 4.5 saniyede bir sonraki satıra yumuşakça ilerle
       highlightLineByIndex(initialIdx, false);
       plainScrollIntervalId = setInterval(() => {
-        if (!autoScrollEnabled || syncPaused) return;
+        if (!autoScrollEnabled || syncPaused || isSongFinished) return;
         const nextIdx = activeLineIdx + 1;
-        if (currentSong && currentSong.lines && nextIdx < currentSong.lines.length) {
-          highlightLineByIndex(nextIdx, true);
+        if (currentSong && currentSong.lines) {
+          if (nextIdx < currentSong.lines.length) {
+            highlightLineByIndex(nextIdx, true);
+          } else {
+            // Şarkı sözlerinin sonuna ulaşıldı
+            isSongFinished = true;
+            stopKaraokeSync();
+            if (btnStopSync) btnStopSync.textContent = "🔄 Baştan";
+            btnSyncPause.textContent = "🔄 Baştan";
+          }
         }
       }, 4500);
     }
@@ -739,23 +763,55 @@
   if (btnSyncForward05) btnSyncForward05.addEventListener("click", () => adjustSync(0.5));
   if (btnSyncForward1) btnSyncForward1.addEventListener("click", () => adjustSync(1.0));
 
-  btnSyncPause.addEventListener("click", () => {
+  // Şarkı Ekranını Kapatıp Ana Ekrana Dön
+  function closeLyricsView() {
+    stopKaraokeSync();
+    currentSong = null;
+    lyricsSection.classList.add("hidden");
+    listenSection.classList.remove("hidden");
+    statusMessage.textContent = "Hazır. Şarkıyı dinletmek için dokunun veya arama kutusuna yazın.";
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  if (btnCloseLyrics) {
+    btnCloseLyrics.addEventListener("click", closeLyricsView);
+  }
+
+  // Akışı Durdur / Başlat Fonksiyonu
+  function toggleSyncFlow() {
+    if (isSongFinished) {
+      isSongFinished = false;
+      syncBaseOffsetSec = 0;
+      syncStartPerfTime = performance.now();
+      syncPaused = false;
+      btnSyncPause.textContent = "⏸ Duraklat";
+      if (btnStopSync) btnStopSync.textContent = "⏹️ Akışı Durdur";
+      startKaraokeSync();
+      return;
+    }
+
     if (!syncPaused) {
       syncBaseOffsetSec = getCurrentPlaybackSec();
       syncPaused = true;
       btnSyncPause.textContent = "▶️ Devam Et";
+      if (btnStopSync) btnStopSync.textContent = "▶ Akışı Başlat";
     } else {
       syncStartPerfTime = performance.now();
       syncPaused = false;
       btnSyncPause.textContent = "⏸ Duraklat";
+      if (btnStopSync) btnStopSync.textContent = "⏹️ Akışı Durdur";
     }
-  });
+  }
+
+  if (btnStopSync) {
+    btnStopSync.addEventListener("click", toggleSyncFlow);
+  }
+
+  btnSyncPause.addEventListener("click", toggleSyncFlow);
 
   // Yeni Şarkı Dinle
   btnListenAgain.addEventListener("click", () => {
-    stopKaraokeSync();
-    lyricsSection.classList.add("hidden");
-    listenSection.classList.remove("hidden");
+    closeLyricsView();
     startListening();
   });
 

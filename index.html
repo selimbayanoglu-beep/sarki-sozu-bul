@@ -89,21 +89,29 @@
     <section id="lyricsSection" class="lyrics-section hidden">
       <!-- Şarkı Başlığı ve Kontroller -->
       <div class="track-header">
-        <div class="track-meta">
-          <img id="trackCover" src="icon.svg" alt="Kapak" class="track-cover" />
-          <div class="track-info">
-            <div class="track-badges">
-              <span id="badgeLayer" class="badge badge-layer">4 Katmanlı Motor</span>
-              <span id="badgeSync" class="badge badge-sync">Canlı Senkron</span>
+        <div class="track-header-top">
+          <div class="track-meta">
+            <img id="trackCover" src="icon.svg" alt="Kapak" class="track-cover" />
+            <div class="track-info">
+              <div class="track-badges">
+                <span id="badgeLayer" class="badge badge-layer">4 Katmanlı Motor</span>
+                <span id="badgeSync" class="badge badge-sync">Canlı Senkron</span>
+              </div>
+              <h2 id="trackTitle" class="track-title">Şarkı Adı</h2>
+              <p id="trackArtist" class="track-artist">Sanatçı</p>
             </div>
-            <h2 id="trackTitle" class="track-title">Şarkı Adı</h2>
-            <p id="trackArtist" class="track-artist">Sanatçı</p>
           </div>
+          <button id="btnCloseLyrics" class="btn-close-lyrics" type="button" title="Şarkıyı Kapat ve Ana Ekrana Dön">
+            ✕ Kapat
+          </button>
         </div>
 
         <div class="stage-controls">
           <button id="btnListenAgain" class="ctrl-btn primary-ctrl" type="button">
             🎧 Yeni Şarkı Dinle
+          </button>
+          <button id="btnStopSync" class="ctrl-btn danger-ctrl" type="button" title="Sözlerin akmasını duraklat veya başlat">
+            ⏹️ Akışı Durdur
           </button>
           <button id="btnTranslate" class="ctrl-btn" type="button" title="Yabancı şarkıların Türkçe çevirisini satır altında göster">
             🇹🇷 Türkçe Çeviri
@@ -127,7 +135,7 @@
           <div class="sync-offset-btns">
             <button id="btnSyncBack1" class="sync-adj-btn" type="button">-1s</button>
             <button id="btnSyncBack05" class="sync-adj-btn" type="button">-0.5s</button>
-            <button id="btnSyncPause" class="sync-adj-btn" type="button">⏸ Duraklat</button>
+            <button id="btnSyncPause" class="sync-adj-btn pause-btn" type="button">⏸ Duraklat</button>
             <button id="btnSyncForward05" class="sync-adj-btn" type="button">+0.5s</button>
             <button id="btnSyncForward1" class="sync-adj-btn" type="button">+1s</button>
           </div>
