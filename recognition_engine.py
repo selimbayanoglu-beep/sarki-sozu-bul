@@ -60,6 +60,12 @@ except Exception:
     HAS_SPEECH_REC = False
 
 
+try:
+    import static_ffmpeg
+    static_ffmpeg.add_paths()
+except Exception:
+    pass
+
 FFMPEG_BIN = shutil.which("ffmpeg")
 _EXECUTOR = ThreadPoolExecutor(max_workers=6)
 
