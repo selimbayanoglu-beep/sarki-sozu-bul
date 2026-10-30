@@ -1,0 +1,51 @@
+name: sarki-sozu-bul
+services:
+  sarki-sozu-bul:
+    image: python:3.11-slim
+    container_name: sarki-sozu-bul
+    restart: unless-stopped
+    working_dir: /app
+    environment:
+      PORT: "8891"
+      HTTPS_PORT: "8892"
+      PYTHONUNBUFFERED: "1"
+    ports:
+      - target: 8891
+        published: "8891"
+        protocol: tcp
+      - target: 8892
+        published: "8892"
+        protocol: tcp
+    volumes:
+      - type: bind
+        source: /DATA/AppData/sarki-sozu-bul
+        target: /app
+    command:
+      - sh
+      - -c
+      - |
+        apt-get update && apt-get install -y --no-install-recommends ffmpeg flac openssl ca-certificates curl git &&
+        if [ ! -f /app/server.py ]; then
+          git clone https://github.com/selimbayanoglu-beep/sarki-sozu-bul.git /tmp/repo && cp -r /tmp/repo/* /app/ && rm -rf /tmp/repo;
+        fi &&
+        pip install --no-cache-dir -r /app/requirements.txt &&
+        chmod +x /app/entrypoint.sh &&
+        /app/entrypoint.sh
+x-casaos:
+  architectures:
+    - amd64
+    - arm64
+  main: sarki-sozu-bul
+  author: Selim
+  category: Music
+  description:
+    en_us: 4-Layer Music & Live Vocal Recognition to Synced Karaoke Lyrics
+    tr_tr: 4 Katmanlı Müzik ve Vokal Tanıma ile Canlı Senkronize Şarkı Sözü Bulucu
+  hostname: 159.195.255.168
+  icon: https://raw.githubusercontent.com/selimbayanoglu-beep/sarki-sozu-bul/main/icon.svg
+  index: /
+  port_map: "8891"
+  scheme: http
+  title:
+    en_us: Sarki Sozu Bul
+    tr_tr: Şarkı Sözü Bul
