@@ -109,7 +109,74 @@ def search_ytmusic_song_and_lyrics(query: str) -> Optional[Dict[str, Any]]:
         if thumbnails:
             cover = thumbnails[-1].get("url") or ""
 
-        # 1. Önce LRCLIB'de senkronize karaoke sözü var mı bakalım!
+        # 1. Önce YouTube Music'in kendi resmi (ve varsa milisaniye zaman damgalı) şarkı sözlerini çekelim
+        yt_plain_result = None
+        if video_id:
+            try:
+                watch = yt.get_watch_playlist(videoId=video_id)
+                lyrics_browse_id = watch.get("lyrics")
+                if lyrics_browse_id:
+                    lyr_data = None
+                    try:
+                        lyr_data = yt.get_lyrics(lyrics_browse_id, timestamps=True)
+                    except Exception:
+                        try:
+                            lyr_data = yt.get_lyrics(lyrics_browse_id)
+                        except Exception:
+                            lyr_data = None
+
+                    if lyr_data:
+                        raw_items = lyr_data.get("lyrics")
+                        if lyr_data.get("hasTimestamps") and isinstance(raw_items, list):
+                            timed_lines = []
+                            plain_parts = []
+                            for item in raw_items:
+                                txt = (
+                                    getattr(item, "text", None)
+                                    or (item.get("text") if isinstance(item, dict) else "")
+                                    or ""
+                                ).strip()
+                                if not txt or txt == "♪":
+                                    continue
+                                start_ms = getattr(item, "start_time", None)
+                                if start_ms is None and isinstance(item, dict):
+                                    start_ms = item.get("start_time")
+                                t_sec = round(float(start_ms) / 1000.0, 2) if start_ms is not None else None
+                                timed_lines.append({
+                                    "index": len(timed_lines),
+                                    "time": t_sec,
+                                    "text": txt,
+                                })
+                                plain_parts.append(txt)
+                            if timed_lines:
+                                return {
+                                    "title": title,
+                                    "artist": artist,
+                                    "album": best.get("album", {}).get("name", "") if isinstance(best.get("album"), dict) else "",
+                                    "cover": cover,
+                                    "duration": duration_sec,
+                                    "synced": True,
+                                    "lines": timed_lines,
+                                    "plain_lyrics": "\n".join(plain_parts),
+                                    "source": "YouTube Music (Canlı Karaoke Senkron)",
+                                }
+                        elif isinstance(raw_items, str) and len(raw_items.strip()) > 20:
+                            raw_lyrics = raw_items.strip()
+                            yt_plain_result = {
+                                "title": title,
+                                "artist": artist,
+                                "album": best.get("album", {}).get("name", "") if isinstance(best.get("album"), dict) else "",
+                                "cover": cover,
+                                "duration": duration_sec,
+                                "synced": False,
+                                "lines": plain_to_lines(raw_lyrics),
+                                "plain_lyrics": raw_lyrics,
+                                "source": "YouTube Music Resmi Sözler",
+                            }
+            except Exception:
+                pass
+
+        # 2. YouTube Music'te zaman damgası yoksa LRCLIB'de senkronize karaoke sözü var mı bakalım
         lrc_match = search_lrclib_by_track(title, artist)
         if lrc_match and lrc_match.get("lines"):
             if not lrc_match.get("cover") and cover:
@@ -117,29 +184,8 @@ def search_ytmusic_song_and_lyrics(query: str) -> Optional[Dict[str, Any]]:
             lrc_match["source"] = "YouTube Music + LRCLIB (Senkronize)"
             return lrc_match
 
-        # 2. LRCLIB yoksa YouTube Music'in kendi resmi şarkı sözlerini çekelim
-        if video_id:
-            try:
-                watch = yt.get_watch_playlist(videoId=video_id)
-                lyrics_browse_id = watch.get("lyrics")
-                if lyrics_browse_id:
-                    lyr_data = yt.get_lyrics(lyrics_browse_id)
-                    raw_lyrics = (lyr_data.get("lyrics") or "").strip()
-                    if raw_lyrics and len(raw_lyrics) > 20:
-                        lines = plain_to_lines(raw_lyrics)
-                        return {
-                            "title": title,
-                            "artist": artist,
-                            "album": best.get("album", {}).get("name", "") if isinstance(best.get("album"), dict) else "",
-                            "cover": cover,
-                            "duration": duration_sec,
-                            "synced": False,
-                            "lines": lines,
-                            "plain_lyrics": raw_lyrics,
-                            "source": "YouTube Music Resmi Sözler",
-                        }
-            except Exception:
-                pass
+        if yt_plain_result:
+            return yt_plain_result
 
         # 3. YouTube Music resmi sözü yoksa Genius'tan şarkı sözlerini çekmeyi dene
         try:
@@ -306,7 +352,7 @@ def search_lrclib_by_track(title: str, artist: str = "") -> Optional[Dict[str, A
         try:
             qs = urllib.parse.urlencode(params)
             url = f"https://lrclib.net/api/search?{qs}"
-            data = _http_get_json(url, timeout=5.5)
+            data = _http_get_json(url, timeout=2.5)
             if not isinstance(data, list) or not data:
                 continue
             # Önce senkronize sözü (syncedLyrics) olan ve sanatçısı uyuşan kaydı seç
@@ -343,8 +389,12 @@ def search_lrclib_by_track(title: str, artist: str = "") -> Optional[Dict[str, A
                     "plain_lyrics": plain_raw or "\n".join(x["text"] for x in synced_lines),
                     "source": "LRCLIB (Senkronize Karaoke)" if synced_lines else "LRCLIB",
                 }
-        except Exception:
+        except urllib.error.HTTPError as he:
+            if he.code >= 500:
+                break
             continue
+        except Exception:
+            break
     return None
 
 
@@ -515,13 +565,15 @@ def get_full_lyrics_for_track(
     """
     Tanınan bir şarkı için en iyi (tercihen zaman senkronizasyonlu LRC) şarkı sözünü getirir.
     """
-    result = search_lrclib_by_track(title, artist)
+    # 1. Önce YouTube Music resmi şarkı ve milisaniye senkronlu karaoke veritabanı
+    result = search_ytmusic_song_and_lyrics(f"{artist} {title}".strip())
 
-    if not result or not result.get("lines"):
-        # YouTube Music resmi şarkı ve söz veritabanı
-        yt_res = search_ytmusic_song_and_lyrics(f"{artist} {title}".strip())
-        if yt_res and yt_res.get("lines"):
-            result = yt_res
+    # 2. YouTube Music'te söz bulunamadıysa veya senkronize değilse LRCLIB dene
+    if not result or not result.get("lines") or not result.get("synced"):
+        lrc_res = search_lrclib_by_track(title, artist)
+        if lrc_res and lrc_res.get("lines"):
+            if lrc_res.get("synced") or not result or not result.get("lines"):
+                result = lrc_res
 
     if not result or not result.get("lines"):
         gen_res = search_genius_lyrics(f"{artist} {title}".strip())

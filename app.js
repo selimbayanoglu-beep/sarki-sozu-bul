@@ -102,7 +102,7 @@
 
   // Sunucu durumu, HTTPS kontrolü ve Otomatik Güncel Motor Yönlendirmesi
   let serverStatus = { https_port: 8892, tunnel_url: "" };
-  const UPGRADED_TUNNEL_API = "https://happy-times-plane-deborah.trycloudflare.com";
+  const UPGRADED_TUNNEL_API = "https://seniors-shelf-pole-learners.trycloudflare.com";
   let activeApiBase =
     location.hostname === "159.195.255.168" ||
     location.hostname === "lately-nokia-removable-cups.trycloudflare.com"
