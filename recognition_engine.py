@@ -58,6 +58,21 @@ if "SSL_CERT_FILE" not in os.environ:
 
 import lyrics_engine
 
+try:
+    from ytmusicapi import YTMusic
+except ImportError:
+    try:
+        import subprocess
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "--no-cache-dir", "ytmusicapi"],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=60,
+        )
+        from ytmusicapi import YTMusic
+    except Exception:
+        pass
+
 # İsteğe bağlı kütüphaneler (Docker sunucusunda tam kurulu olur)
 try:
     from shazamio import Shazam

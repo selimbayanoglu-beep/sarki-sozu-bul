@@ -50,6 +50,19 @@ def _get_ytmusic():
         try:
             from ytmusicapi import YTMusic
             _YTMUSIC = YTMusic()
+        except ImportError:
+            try:
+                import subprocess, sys
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--no-cache-dir", "ytmusicapi"],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=60,
+                )
+                from ytmusicapi import YTMusic
+                _YTMUSIC = YTMusic()
+            except Exception:
+                pass
         except Exception:
             pass
     return _YTMUSIC
