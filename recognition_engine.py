@@ -38,11 +38,23 @@ import urllib.parse
 import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
+import sys
+import ssl
 
-if os.path.exists("/etc/ssl/cert.pem"):
-    os.environ.setdefault("SSL_CERT_FILE", "/etc/ssl/cert.pem")
-elif os.path.exists("/etc/ssl/certs/ca-certificates.crt"):
-    os.environ.setdefault("SSL_CERT_FILE", "/etc/ssl/certs/ca-certificates.crt")
+try:
+    import certifi
+    ca_path = certifi.where()
+    if os.path.exists(ca_path):
+        os.environ["SSL_CERT_FILE"] = ca_path
+        os.environ["REQUESTS_CA_BUNDLE"] = ca_path
+except Exception:
+    pass
+
+if "SSL_CERT_FILE" not in os.environ:
+    if os.path.exists("/etc/ssl/cert.pem"):
+        os.environ["SSL_CERT_FILE"] = "/etc/ssl/cert.pem"
+    elif os.path.exists("/etc/ssl/certs/ca-certificates.crt"):
+        os.environ["SSL_CERT_FILE"] = "/etc/ssl/certs/ca-certificates.crt"
 
 import lyrics_engine
 
@@ -142,12 +154,54 @@ def prepare_dsp_variants(raw_audio_path: str, work_dir: str, wave: int = 1) -> D
     return variants
 
 
+def create_shazam_client() -> Shazam:
+    """
+    ShazamIO istemcisini certifi CA sertifikaları ile yapılandırarak
+    SSLCertVerificationError ve aiohttp bağlantı hatalarını tamamen önler.
+    """
+    shazam = Shazam()
+    try:
+        import certifi, aiohttp
+        from aiohttp_retry import RetryClient
+
+        ca_file = None
+        try:
+            ca_file = certifi.where()
+        except Exception:
+            pass
+
+        if ca_file and os.path.exists(ca_file):
+            ctx = ssl.create_default_context(cafile=ca_file)
+        else:
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+
+        def _patched_ensure():
+            loop = asyncio.get_running_loop()
+            if shazam.http_client._retry_client is None or (shazam.http_client._loop is not loop and not shazam.http_client._closed):
+                connector = aiohttp.TCPConnector(ssl=ctx)
+                shazam.http_client._retry_client = RetryClient(
+                    client_session=aiohttp.ClientSession(connector=connector),
+                    retry_options=shazam.http_client.retry_options,
+                    raise_for_status=False,
+                    trace_configs=[shazam.http_client.trace_config],
+                )
+                shazam.http_client._loop = loop
+            return shazam.http_client._retry_client
+
+        shazam.http_client._ensure_client = _patched_ensure
+    except Exception as exc:
+        sys.stderr.write(f"[SHAZAM INIT UYARI] SSL yaması: {exc}\n")
+    return shazam
+
+
 async def _shazam_recognize_single(file_path: str, variant_label: str) -> Optional[Dict[str, Any]]:
     """Tek bir ses varyasyonunu ShazamIO ile tarar."""
     if not HAS_SHAZAMIO or not os.path.exists(file_path):
         return None
     try:
-        shazam = Shazam()
+        shazam = create_shazam_client()
         out = await asyncio.wait_for(shazam.recognize(file_path), timeout=7.5)
         track = (out or {}).get("track")
         if not track:
@@ -184,7 +238,8 @@ async def _shazam_recognize_single(file_path: str, variant_label: str) -> Option
             "shazam_lyrics": shazam_lyrics,
             "variant_used": variant_label,
         }
-    except Exception:
+    except Exception as exc:
+        sys.stderr.write(f"[SHAZAM] {variant_label} hatası: {exc}\n")
         return None
 
 
@@ -291,15 +346,27 @@ async def run_layer3_vocal_lyrics_extraction(variants: Dict[str, str], preferred
 
     # Yakalanan her söz kesiti için şarkı sözü veritabanlarında arama yap
     for lang_code, phrase in detected_phrases:
+        cleaned_phrase = phrase.strip()
+        words = cleaned_phrase.split()
+        # YANLIŞ EŞLEŞMELERİ (FALSE-POSITIVE) KESİNLİKLE ENGELLE:
+        # 1-2 kelimelik fısıltılar veya ortam sesleri rastgele şarkı eşleştirmemelidir.
+        # En az 3 kelime veya 14 karakterlik belirgin bir dize olmalı.
+        if len(words) < 3 and len(cleaned_phrase) < 14:
+            continue
+
         song_match = await loop.run_in_executor(
-            _EXECUTOR, lyrics_engine.search_song_by_lyrics_snippet, phrase
+            _EXECUTOR, lyrics_engine.search_song_by_lyrics_snippet, cleaned_phrase
         )
         if song_match and song_match.get("lines"):
-            song_match["layer_used"] = f"Katman 3: AI Vokalden Söz Yakalama ({lang_code})"
-            song_match["detected_vocal_phrase"] = phrase
-            return song_match
+            # ÇİFTE DOĞRULAMA: Bulunan şarkının sözleri gerçekten bu söz öbeğini içeriyor mu?
+            matched_idx, sim = lyrics_engine.find_matching_line_index(song_match["lines"], cleaned_phrase)
+            if sim >= 0.55:
+                song_match["layer_used"] = f"Katman 3: AI Vokalden Söz Yakalama ({lang_code})"
+                song_match["detected_vocal_phrase"] = cleaned_phrase
+                song_match["matched_line_index"] = matched_idx
+                return song_match
 
-    # Şarkı tam eşleşmese bile yakalanan kelimeleri bilgi olarak döndür
+    # Şarkı tam doğrulanmadıysa sadece ekranda bilgi amaçlı kelimeleri döndür
     return {
         "partial_vocal_only": True,
         "detected_phrases": detected_phrases,
