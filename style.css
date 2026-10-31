@@ -365,24 +365,41 @@ html, body {
 }
 
 /* Şarkı Sözü & Karaoke Sahne Ekranı */
+body.lyrics-active {
+  overflow: hidden;
+  height: 100dvh;
+}
+
+body.lyrics-active .top-bar {
+  display: none;
+}
+
+body.lyrics-active .app-shell {
+  height: 100dvh;
+  max-height: 100dvh;
+  overflow: hidden;
+  padding: 8px 10px calc(10px + env(safe-area-inset-bottom, 0px));
+}
+
 .lyrics-section {
   flex: 1;
+  min-height: 0;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  margin-top: 10px;
+  gap: 8px;
+  margin-top: 2px;
+  overflow: hidden;
 }
 
 .track-header {
   background: var(--bg-card);
   border: 1px solid var(--border-subtle);
   border-radius: 16px;
-  padding: 14px;
+  padding: 10px 12px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
-  position: sticky;
-  top: 6px;
+  gap: 8px;
+  flex-shrink: 0;
   z-index: 10;
   backdrop-filter: blur(16px);
 }
@@ -391,13 +408,13 @@ html, body {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  gap: 12px;
+  gap: 10px;
 }
 
 .track-meta {
   display: flex;
   align-items: center;
-  gap: 13px;
+  gap: 10px;
   flex: 1;
   min-width: 0;
 }
@@ -406,9 +423,9 @@ html, body {
   background: rgba(255, 61, 113, 0.12);
   color: #ff4d6d;
   border: 1px solid rgba(255, 61, 113, 0.35);
-  padding: 8px 14px;
-  border-radius: 12px;
-  font-size: 0.85rem;
+  padding: 7px 12px;
+  border-radius: 10px;
+  font-size: 0.82rem;
   font-weight: 800;
   cursor: pointer;
   white-space: nowrap;
@@ -424,9 +441,9 @@ html, body {
 }
 
 .track-cover {
-  width: 66px;
-  height: 66px;
-  border-radius: 12px;
+  width: 50px;
+  height: 50px;
+  border-radius: 10px;
   object-fit: cover;
   background: var(--bg-elevated);
   border: 1px solid var(--border-subtle);
@@ -441,14 +458,14 @@ html, body {
 .track-badges {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px;
-  margin-bottom: 5px;
+  gap: 5px;
+  margin-bottom: 3px;
 }
 
 .badge {
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   font-weight: 700;
-  padding: 3px 8px;
+  padding: 2px 7px;
   border-radius: 6px;
   text-transform: uppercase;
   letter-spacing: 0.03em;
@@ -465,7 +482,7 @@ html, body {
 }
 
 .track-title {
-  font-size: 1.22rem;
+  font-size: 1.08rem;
   font-weight: 800;
   white-space: nowrap;
   overflow: hidden;
@@ -473,7 +490,7 @@ html, body {
 }
 
 .track-artist {
-  font-size: 0.92rem;
+  font-size: 0.84rem;
   color: var(--text-muted);
   white-space: nowrap;
   overflow: hidden;
@@ -484,16 +501,16 @@ html, body {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
-  gap: 7px;
+  gap: 6px;
 }
 
 .ctrl-btn {
   background: var(--bg-elevated);
   color: var(--text-main);
   border: 1px solid var(--border-subtle);
-  padding: 8px 12px;
-  border-radius: 10px;
-  font-size: 0.8rem;
+  padding: 6px 10px;
+  border-radius: 9px;
+  font-size: 0.76rem;
   font-weight: 700;
   cursor: pointer;
   transition: all 0.15s ease;
@@ -529,7 +546,7 @@ html, body {
 }
 
 .small-ctrl {
-  padding: 8px 10px;
+  padding: 6px 9px;
 }
 
 /* Canlı Senkronize Zamanlayıcı Çubuğu */
@@ -538,10 +555,10 @@ html, body {
   flex-wrap: wrap;
   align-items: center;
   justify-content: space-between;
-  gap: 8px;
-  padding-top: 8px;
+  gap: 6px;
+  padding-top: 6px;
   border-top: 1px solid var(--border-subtle);
-  font-size: 0.78rem;
+  font-size: 0.75rem;
 }
 
 .sync-time-display {
@@ -579,19 +596,21 @@ html, body {
   color: var(--text-main);
   border: 1px solid var(--border-subtle);
   border-radius: 7px;
-  padding: 4px 9px;
-  font-size: 0.74rem;
+  padding: 4px 8px;
+  font-size: 0.72rem;
   font-weight: 600;
   cursor: pointer;
 }
 
 /* Şarkı Sözleri Akış Kutusu (Yüksek Kontrastlı Bar Modu) */
 .lyrics-container {
-  background: rgba(12, 14, 22, 0.92);
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  background: rgba(12, 14, 22, 0.94);
   border: 1px solid var(--border-subtle);
   border-radius: 18px;
-  padding: 26px 18px 120px;
-  max-height: 66dvh;
+  padding: 18px 16px 210px;
   overflow-y: auto;
   scroll-behavior: smooth;
 }
@@ -599,35 +618,66 @@ html, body {
 .lyrics-lines {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
 }
 
+/* Söylenecek sözler (varsayılan / upcoming): Aydınlık, parlak ve rahat okunur */
 .lyric-line {
   padding: 10px 14px;
   border-radius: 12px;
   font-size: var(--lyric-font-size);
   font-weight: 700;
-  line-height: 1.38;
-  color: rgba(244, 246, 251, 0.52);
+  line-height: 1.36;
+  color: #f1f5f9;
+  opacity: 0.90;
   transition: all 0.25s ease;
   cursor: pointer;
 }
 
 .lyric-line:hover {
-  color: rgba(244, 246, 251, 0.85);
-  background: rgba(255, 255, 255, 0.03);
+  color: #ffffff;
+  opacity: 1;
+  background: rgba(255, 255, 255, 0.05);
 }
 
+/* Önce söylenen sözler (past): Çok silik ve geri planda */
 .lyric-line.past {
-  color: rgba(244, 246, 251, 0.35);
+  color: rgba(148, 163, 184, 0.24);
+  opacity: 0.32;
+  font-weight: 500;
+  transform: scale(0.97);
 }
 
+.lyric-line.past .lyric-time-tag {
+  opacity: 0.3;
+}
+
+/* Şu an söylenen aktif söz: Tam parlak sahne vurgusu */
 .lyric-line.active {
   color: #ffffff;
-  background: linear-gradient(90deg, rgba(0, 229, 255, 0.18) 0%, rgba(124, 77, 255, 0.08) 100%);
+  opacity: 1;
+  font-weight: 800;
+  background: linear-gradient(90deg, rgba(0, 229, 255, 0.24) 0%, rgba(124, 77, 255, 0.14) 100%);
   border-left: 4px solid var(--accent-primary);
-  transform: scale(1.02);
-  text-shadow: 0 0 18px rgba(0, 229, 255, 0.45);
+  transform: scale(1.015);
+  text-shadow: 0 0 18px rgba(0, 229, 255, 0.55);
+  box-shadow: 0 4px 18px rgba(0, 229, 255, 0.14);
+}
+
+/* Hemen sıradaki söylenecek sözler (next-up): Çok aydınlık ve belirgin */
+.lyric-line.next-up {
+  color: #ffffff;
+  opacity: 0.97;
+  font-weight: 700;
+  background: rgba(255, 255, 255, 0.055);
+  border-left: 3px solid rgba(0, 229, 255, 0.48);
+  text-shadow: 0 0 10px rgba(255, 255, 255, 0.2);
+}
+
+/* Diğer söylenecek sözler (upcoming): Aydınlık */
+.lyric-line.upcoming {
+  color: #f1f5f9;
+  opacity: 0.90;
 }
 
 .lyric-time-tag {

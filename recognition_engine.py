@@ -300,13 +300,16 @@ async def _shazam_recognize_single(file_path: str, variant_label: str) -> Option
         images = track.get("images") or {}
         cover = images.get("coverarthq") or images.get("coverart") or images.get("background") or ""
 
-        # Şarkının o anki çalma saniyesini (offset) yakala
+        # Şarkının o anki çalma saniyesini (offset) yakala:
+        # Shazam'ın döndürdüğü raw_offset, gönderilen ses kesitinin BAŞLANGIÇ saniyesidir.
+        # Kesitin gerçek uzunluğunu (sig.signature.samples ms) ekleyerek kesitin BİTİŞ (şu anki) saniyesini buluyoruz.
         offset_seconds: Optional[float] = None
         matches = (out or {}).get("matches") or []
         if matches and isinstance(matches[0], dict):
             raw_offset = matches[0].get("offset")
             if isinstance(raw_offset, (int, float)):
-                offset_seconds = round(float(raw_offset), 2)
+                sample_dur_sec = float(getattr(sig.signature, "samples", 0) or 0) / 1000.0
+                offset_seconds = round(float(raw_offset) + sample_dur_sec, 2)
 
         # Shazam içinde gömülü söz varsa yedek olarak al
         shazam_lyrics: List[str] = []
@@ -491,9 +494,6 @@ async def recognize_music_pipeline(
 
         fp_result = await fp_task
         if fp_result and fp_result.get("title"):
-            if vocal_task and not vocal_task.done():
-                vocal_task.cancel()
-
             # KATMAN 4: Tam Şarkı Sözlerini ve Senkronize Karaoke Satırlarını Getir
             full_lyrics = await loop.run_in_executor(
                 _EXECUTOR,
@@ -506,9 +506,36 @@ async def recognize_music_pipeline(
                 "",
             )
 
+            # Telefondan gelen canlı vokal sözü varsa (video/canlı performans farklarını düzeltmek için) kontrol et
+            if vocal_task:
+                try:
+                    vocal_res = await asyncio.wait_for(vocal_task, timeout=0.65)
+                    if vocal_res and full_lyrics.get("lines"):
+                        phrases_to_check = []
+                        if vocal_res.get("detected_vocal_phrase"):
+                            phrases_to_check.append(vocal_res["detected_vocal_phrase"])
+                        for _lc, ph in vocal_res.get("detected_phrases") or []:
+                            phrases_to_check.append(ph)
+                        for ph in phrases_to_check:
+                            if len(ph.strip()) >= 8:
+                                v_idx, v_time = lyrics_engine.find_matching_line_index(full_lyrics["lines"], ph)
+                                if v_idx is not None and v_idx >= 0:
+                                    full_lyrics["matched_line_index"] = v_idx
+                                    full_lyrics["detected_vocal_phrase"] = ph
+                                    if v_time is not None:
+                                        shazam_off = full_lyrics.get("offset_seconds")
+                                        # Eğer telefondan duyulan söz ile stüdyo kaydı arasında >2.5sn fark varsa telefondaki sese kilitle
+                                        if shazam_off is None or abs(shazam_off - (v_time + 1.5)) > 2.5:
+                                            full_lyrics["offset_seconds"] = round(v_time + 1.5, 2)
+                                    break
+                except Exception:
+                    if not vocal_task.done():
+                        vocal_task.cancel()
+
             variant_map = {
                 "normalized": "Katman 1+2: Akustik Dengelemeli Ses İzi",
                 "raw": "Katman 2: Doğrudan Ses İzi",
+                "tail_focus": "Katman 1+2: Canlı Son Kesit Ses İzi",
                 "pitch_down": "Katman 1+2: DJ Hız/Pitch Düzeltmeli (-3.5%) Ses İzi",
                 "pitch_up": "Katman 1+2: DJ Hız/Pitch Düzeltmeli (+3.5%) Ses İzi",
             }
@@ -528,6 +555,8 @@ async def recognize_music_pipeline(
             except asyncio.CancelledError:
                 pass
             if vocal_result and not vocal_result.get("partial_vocal_only") and vocal_result.get("title"):
+                if isinstance(vocal_result.get("offset_seconds"), (int, float)):
+                    vocal_result["offset_seconds"] = round(float(vocal_result["offset_seconds"]) + 1.6, 2)
                 vocal_result["recognized"] = True
                 vocal_result["wave"] = wave
                 vocal_result["elapsed_ms"] = int((time.time() - start_time) * 1000)
@@ -546,6 +575,98 @@ async def recognize_music_pipeline(
                 f"Dalga {wave} tarandı ({', '.join(detected_words) if detected_words else 'enstrümantal/vokal bekleniyor'}), "
                 "dinlemeye devam ediliyor..."
             ),
+        }
+    finally:
+        shutil.rmtree(work_dir, ignore_errors=True)
+
+
+async def sync_live_audio_to_lyrics(
+    audio_bytes: bytes,
+    file_ext: str,
+    title: str,
+    artist: str,
+    lines: List[Dict[str, Any]],
+) -> Dict[str, Any]:
+    """
+    Şarkı sözleri ekranda akarken telefon mikrofonundan gelen canlı sesi (4 sn) analiz eder.
+    Hem şarkıcının söylediği kelimeleri (AI STT) hem de canlı akustik parmak izini (Shazam)
+    kontrol ederek sözleri internet saatine değil, telefondan gelen gerçek sese kilitler.
+    """
+    work_dir = tempfile.mkdtemp(prefix="sarki_sync_")
+    try:
+        raw_path = os.path.join(work_dir, f"sync{file_ext}")
+        with open(raw_path, "wb") as f:
+            f.write(audio_bytes)
+
+        loop = asyncio.get_running_loop()
+        norm_path = os.path.join(work_dir, "norm.wav")
+        vocal_path = os.path.join(work_dir, "vocal.wav")
+
+        def _prep():
+            if FFMPEG_BIN:
+                _run_ffmpeg(
+                    raw_path,
+                    norm_path,
+                    "highpass=f=85,lowpass=f=8000,dynaudnorm=f=120:g=15:p=0.92:m=20",
+                    sample_rate=44100,
+                    tail_seconds=4.5,
+                )
+                _run_ffmpeg(
+                    raw_path,
+                    vocal_path,
+                    "highpass=f=180,lowpass=f=4200,equalizer=f=1200:t=q:w=1.2:g=6,dynaudnorm=f=120:g=15:p=0.92:m=15",
+                    sample_rate=16000,
+                    tail_seconds=4.5,
+                )
+
+        await loop.run_in_executor(_EXECUTOR, _prep)
+        target_norm = norm_path if os.path.exists(norm_path) else raw_path
+        target_vocal = vocal_path if os.path.exists(vocal_path) else target_norm
+
+        fp_task = asyncio.create_task(_shazam_recognize_single(target_norm, "live_sync"))
+        stt_task = loop.run_in_executor(_EXECUTOR, _extract_vocals_text_sync, target_vocal, ["tr-TR", "en-US"])
+
+        fp_res = None
+        stt_phrases = []
+        try:
+            fp_res = await asyncio.wait_for(fp_task, timeout=2.8)
+        except Exception:
+            pass
+        try:
+            stt_phrases = await asyncio.wait_for(stt_task, timeout=2.8)
+        except Exception:
+            pass
+
+        # 1. Öncelik: Telefondan duyulan canlı vokal sözleri şarkının bir satırıyla eşleşiyor mu?
+        if stt_phrases and lines:
+            for _lang, phrase in stt_phrases:
+                cleaned = phrase.strip()
+                if len(cleaned) >= 6:
+                    m_idx, m_time = lyrics_engine.find_matching_line_index(lines, cleaned)
+                    if m_idx is not None and m_idx >= 0:
+                        return {
+                            "synced": True,
+                            "method": "vocal_live",
+                            "matched_line_index": m_idx,
+                            "offset_seconds": round(float(m_time) + 1.5, 2) if m_time is not None else None,
+                            "detected_phrase": cleaned,
+                        }
+
+        # 2. Öncelik: Telefondan duyulan müziğin akustik parmak izi saniyesi (Shazam live offset)
+        if fp_res and fp_res.get("title") and isinstance(fp_res.get("offset_seconds"), (int, float)):
+            t1 = lyrics_engine.normalize_text(fp_res.get("title") or "")
+            t2 = lyrics_engine.normalize_text(title or "")
+            if not t2 or (t1 and (t1 in t2 or t2 in t1 or t1[:5] == t2[:5])):
+                return {
+                    "synced": True,
+                    "method": "acoustic_live",
+                    "offset_seconds": fp_res["offset_seconds"],
+                    "detected_phrase": stt_phrases[0][1] if stt_phrases else "",
+                }
+
+        return {
+            "synced": False,
+            "detected_phrase": stt_phrases[0][1] if stt_phrases else "",
         }
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)

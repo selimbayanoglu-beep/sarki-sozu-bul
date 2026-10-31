@@ -235,7 +235,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Wave, X-File-Ext, X-Lang")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Wave, X-File-Ext, X-Lang, X-Track-Title, X-Track-Artist")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -243,7 +243,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Wave, X-File-Ext, X-Lang")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Wave, X-File-Ext, X-Lang, X-Track-Title, X-Track-Artist")
         self.end_headers()
 
     def do_GET(self) -> None:
@@ -356,6 +356,42 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
             except Exception as exc:
                 record_log(f"❌ Tanıma hatası: {exc}")
                 self._send_json({"ok": False, "error": f"Tanıma hatası: {exc}"}, 500)
+            return
+
+        if path == "/api/sync-audio":
+            if not body or len(body) < 200:
+                self._send_json({"ok": False, "error": "Ses verisi boş."}, 400)
+                return
+            file_ext = self.headers.get("X-File-Ext", ".wav")
+            if not file_ext.startswith("."):
+                file_ext = "." + file_ext
+            raw_title = urllib.parse.unquote(self.headers.get("X-Track-Title", "") or "")
+            raw_artist = urllib.parse.unquote(self.headers.get("X-Track-Artist", "") or "")
+
+            # Geçmişten mevcut şarkının satırlarını bul
+            lines_for_sync: List[Dict[str, Any]] = []
+            for h_item in load_history():
+                if (h_item.get("title") or "").strip().lower() == raw_title.strip().lower():
+                    lines_for_sync = h_item.get("lines") or []
+                    break
+
+            try:
+                sync_res = asyncio.run(
+                    recognition_engine.sync_live_audio_to_lyrics(
+                        audio_bytes=body,
+                        file_ext=file_ext,
+                        title=raw_title,
+                        artist=raw_artist,
+                        lines=lines_for_sync,
+                    )
+                )
+                if sync_res.get("synced"):
+                    record_log(
+                        f"🎯 Canlı Ses Senkronu [{sync_res.get('method')}]: offset={sync_res.get('offset_seconds')}s, idx={sync_res.get('matched_line_index')}"
+                    )
+                self._send_json({"ok": True, "result": sync_res})
+            except Exception as exc:
+                self._send_json({"ok": False, "error": str(exc)}, 500)
             return
 
         if path == "/api/translate":

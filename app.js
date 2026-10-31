@@ -100,9 +100,17 @@
   let plainScrollIntervalId = null;
   let fontSizeRem = 1.45;
 
+  // Canlı Telefon Mikrofonu ile Senkron Takibi (Sözlerin internet saatine değil telefondaki sese kilitlenmesi)
+  let isLiveMicSyncing = false;
+  let liveMicSyncTimerId = null;
+  let liveSilenceCheckId = null;
+  let autoSilencePaused = false;
+  let lastSoundHeardPerfTime = 0;
+  let isSyncAudioInFlight = false;
+
   // Sunucu durumu, HTTPS kontrolü ve Otomatik Güncel Motor Yönlendirmesi
   let serverStatus = { https_port: 8892, tunnel_url: "" };
-  const UPGRADED_TUNNEL_API = "https://seniors-shelf-pole-learners.trycloudflare.com";
+  const UPGRADED_TUNNEL_API = "https://periods-gravity-bases-diego.trycloudflare.com";
   let activeApiBase =
     location.hostname === "159.195.255.168" ||
     location.hostname === "lately-nokia-removable-cups.trycloudflare.com"
@@ -433,12 +441,11 @@
 
         if (res.recognized && res.title) {
           // ŞARKI BULUNDU! Gecikme telafisini tam ve doğru hesapla:
-          // Shazam'ın döndürdüğü offset, gönderilen ses kesitinin BAŞLANGIÇ saniyesidir.
-          // O kesitin başından cevabın geldiği şu ana kadar geçen toplam süre: durationSec + latencySec
+          // Sunucu (_shazam_recognize_single), gönderilen ses kesitinin BİTİŞ (waveCapturedAt) saniyesini döndürür.
+          // Bu yüzden sadece ağ/işlem süresi kadar (latencySec) ileri sarıyoruz.
           const latencySec = (performance.now() - waveCapturedAt) / 1000.0;
-          const totalElapsed = durationSec + latencySec;
           if (typeof res.offset_seconds === "number") {
-            res.offset_seconds = Math.max(0, res.offset_seconds + totalElapsed);
+            res.offset_seconds = Math.max(0, res.offset_seconds + latencySec);
           }
           stopListening(true);
           if (navigator.vibrate) {
@@ -562,8 +569,16 @@
 
     processorNode = audioCtx.createScriptProcessor(4096, 1, 1);
     processorNode.onaudioprocess = (e) => {
-      if (!isListening) return;
+      if (!isListening && !isLiveMicSyncing) return;
       const input = e.inputBuffer.getChannelData(0);
+      let sumSq = 0;
+      for (let i = 0; i < input.length; i += 4) {
+        sumSq += input[i] * input[i];
+      }
+      const rms = Math.sqrt(sumSq / (input.length / 4));
+      if (rms > 0.0022) {
+        lastSoundHeardPerfTime = performance.now();
+      }
       pcmChunks.push(new Float32Array(input));
       const maxChunks = Math.ceil((25 * sampleRate) / 4096);
       if (pcmChunks.length > maxChunks) {
@@ -579,6 +594,7 @@
     analyserNode.connect(processorNode);
     processorNode.connect(silentGain);
     silentGain.connect(audioCtx.destination);
+    lastSoundHeardPerfTime = performance.now();
 
     drawVisualizer();
 
@@ -590,6 +606,40 @@
       setTimeout(() => sendAudioWave(4, 9.5), 12800),
       setTimeout(() => sendAudioWave(5, 11.2), 16800),
     ];
+  }
+
+  function closeMicStream() {
+    isLiveMicSyncing = false;
+    if (liveMicSyncTimerId) {
+      clearInterval(liveMicSyncTimerId);
+      liveMicSyncTimerId = null;
+    }
+    if (liveSilenceCheckId) {
+      clearInterval(liveSilenceCheckId);
+      liveSilenceCheckId = null;
+    }
+    if (processorNode) {
+      try {
+        processorNode.disconnect();
+      } catch (_) {}
+      processorNode = null;
+    }
+    if (sourceNode) {
+      try {
+        sourceNode.disconnect();
+      } catch (_) {}
+      sourceNode = null;
+    }
+    if (mediaStream) {
+      mediaStream.getTracks().forEach((track) => track.stop());
+      mediaStream = null;
+    }
+    if (audioCtx) {
+      try {
+        audioCtx.close();
+      } catch (_) {}
+      audioCtx = null;
+    }
   }
 
   function stopListening(found = false) {
@@ -618,37 +668,20 @@
       animFrameId = null;
     }
 
-    if (processorNode) {
-      try {
-        processorNode.disconnect();
-      } catch (_) {}
-      processorNode = null;
-    }
-    if (sourceNode) {
-      try {
-        sourceNode.disconnect();
-      } catch (_) {}
-      sourceNode = null;
-    }
-    if (mediaStream) {
-      mediaStream.getTracks().forEach((track) => track.stop());
-      mediaStream = null;
-    }
-    if (audioCtx) {
-      try {
-        audioCtx.close();
-      } catch (_) {}
-      audioCtx = null;
+    // Eğer şarkı bulunduysa (found === true), mikrofonu KAPATMA!
+    // Çünkü sözlerin internet saatine değil, telefondan gelen canlı sese senkronize olması için mikrofonu dinlemeye devam edeceğiz.
+    if (!found) {
+      closeMicStream();
+      resetLayerPills();
+    } else {
+      isLiveMicSyncing = true;
+      lastSoundHeardPerfTime = performance.now();
     }
 
     btnListen.classList.remove("listening");
     orbIcon.textContent = "🎧";
     orbMainText.textContent = "DOKUN & DİNLET";
     orbSubText.textContent = "Bulana kadar otomatik dinler";
-
-    if (!found) {
-      resetLayerPills();
-    }
   }
 
   // Saniyeyi 01:23 formatına çevirir
@@ -667,6 +700,7 @@
     btnTranslate.classList.remove("active");
     btnTranslate.textContent = "🇹🇷 Türkçe Çeviri";
 
+    document.body.classList.add("lyrics-active");
     listenSection.classList.add("hidden");
     lyricsSection.classList.remove("hidden");
 
@@ -676,11 +710,12 @@
     badgeLayer.textContent = song.layer_used || song.source || "4 Katmanlı Motor";
 
     if (song.synced) {
-      badgeSync.textContent = "⚡ Canlı Senkronize Karaoke";
+      badgeSync.textContent = mediaStream ? "🎙️ Telefon Sesiyle Canlı Senkron" : "⚡ Canlı Senkronize Karaoke";
       badgeSync.classList.remove("hidden");
       syncToolbar.classList.remove("hidden");
     } else {
-      badgeSync.textContent = "📜 Tam Şarkı Sözleri";
+      badgeSync.textContent = mediaStream ? "🎙️ Telefon Sesiyle Söz Takibi" : "📜 Tam Şarkı Sözleri";
+      badgeSync.classList.remove("hidden");
       syncToolbar.classList.add("hidden");
     }
 
@@ -703,7 +738,7 @@
 
     lines.forEach((lineObj, idx) => {
       const div = document.createElement("div");
-      div.className = "lyric-line";
+      div.className = "lyric-line upcoming";
       div.dataset.index = String(idx);
 
       if (typeof lineObj.time === "number") {
@@ -744,17 +779,32 @@
     if (!children || children.length === 0) return;
 
     for (let i = 0; i < children.length; i++) {
-      children[i].classList.toggle("past", i < idx);
-      children[i].classList.toggle("active", i === idx);
+      const el = children[i];
+      el.classList.toggle("past", i < idx);
+      el.classList.toggle("active", i === idx);
+      el.classList.toggle("next-up", i === idx + 1 || i === idx + 2);
+      el.classList.toggle("upcoming", i > idx);
     }
 
     activeLineIdx = idx;
     if (autoScrollEnabled && idx >= 0 && idx < children.length) {
       const activeEl = children[idx];
       const containerHeight = lyricsContainer.clientHeight;
-      // Aktif satırı ekranın üst üçte birlik hizasına getir ki yaklaşan satırlar rahatça okunsun
-      const targetScroll =
-        activeEl.offsetTop - lyricsContainer.offsetTop - containerHeight * 0.28;
+      // Aktif satırı kutunun üst %16 hizasına getir ki altındaki söylenecek sözler ekranda tam görünsün
+      let targetScroll = activeEl.offsetTop - containerHeight * 0.16;
+
+      // Söylenen sonraki sözün (idx + 1 ve idx + 2) ekranın altından taşmasını kesin olarak engelle
+      const lookaheadEl = children[Math.min(children.length - 1, idx + 2)] || children[idx + 1] || activeEl;
+      const lookaheadBottom = lookaheadEl.offsetTop + lookaheadEl.offsetHeight;
+      const visibleBottom = Math.max(0, targetScroll) + containerHeight - 24;
+      if (lookaheadBottom > visibleBottom) {
+        const nextEl = children[idx + 1] || activeEl;
+        const nextBottom = nextEl.offsetTop + nextEl.offsetHeight;
+        if (nextBottom > visibleBottom) {
+          targetScroll += nextBottom - visibleBottom + 16;
+        }
+      }
+
       lyricsContainer.scrollTo({
         top: Math.max(0, targetScroll),
         behavior: smoothScroll ? "smooth" : "auto",
@@ -762,7 +812,7 @@
     }
   }
 
-  function stopKaraokeSync() {
+  function stopKaraokeSync(closeMic = false) {
     if (syncIntervalId) {
       clearInterval(syncIntervalId);
       syncIntervalId = null;
@@ -771,11 +821,109 @@
       clearInterval(plainScrollIntervalId);
       plainScrollIntervalId = null;
     }
+    if (liveMicSyncTimerId) {
+      clearInterval(liveMicSyncTimerId);
+      liveMicSyncTimerId = null;
+    }
+    if (liveSilenceCheckId) {
+      clearInterval(liveSilenceCheckId);
+      liveSilenceCheckId = null;
+    }
+    autoSilencePaused = false;
+    if (closeMic) {
+      closeMicStream();
+    }
   }
 
   function getCurrentPlaybackSec() {
-    if (syncPaused) return syncBaseOffsetSec;
+    if (syncPaused || autoSilencePaused) return syncBaseOffsetSec;
     return syncBaseOffsetSec + (performance.now() - syncStartPerfTime) / 1000.0;
+  }
+
+  // Telefondan gelen canlı sesi periyodik olarak analiz edip sözleri gerçek sese kilitler
+  async function pollLiveAudioSync() {
+    if (!isLiveMicSyncing || !currentSong || syncPaused || isSongFinished || isSyncAudioInFlight) {
+      return;
+    }
+    const rawSamples = getRecentSamples(4.2);
+    if (rawSamples.length < sampleRate * 2.5) return;
+
+    const { samples: normSamples, maxPeak } = normalizeSamples(rawSamples);
+    if (maxPeak <= 0.002) {
+      return; // Ortamda anlamlı müzik/vokal sinyali yok
+    }
+
+    isSyncAudioInFlight = true;
+    const capturePerf = performance.now();
+    const wavBlob = encodeWAV(normSamples, sampleRate);
+
+    try {
+      const resp = await apiFetch("/api/sync-audio", {
+        method: "POST",
+        headers: {
+          "Content-Type": "audio/wav",
+          "X-File-Ext": ".wav",
+          "X-Track-Title": encodeURIComponent(currentSong.title || ""),
+          "X-Track-Artist": encodeURIComponent(currentSong.artist || ""),
+        },
+        body: wavBlob,
+      });
+      const data = await resp.json();
+      if (!isLiveMicSyncing || !currentSong || syncPaused || isSongFinished) return;
+
+      if (data && data.ok && data.result && data.result.synced) {
+        const sr = data.result;
+        const roundTripSec = (performance.now() - capturePerf) / 1000.0;
+
+        if (currentSong.synced && typeof sr.offset_seconds === "number") {
+          const livePhoneSec = Math.max(0, sr.offset_seconds + roundTripSec);
+          const currentSec = getCurrentPlaybackSec();
+          // Eğer ekrandaki sayaç ile telefondan gelen gerçek ses arasında > 1.1 sn fark varsa anında gerçek sese hizala!
+          if (Math.abs(livePhoneSec - currentSec) > 1.1) {
+            syncBaseOffsetSec = livePhoneSec;
+            syncStartPerfTime = performance.now();
+            updateSyncedHighlight();
+          }
+          badgeSync.textContent =
+            sr.method === "vocal_live"
+              ? "🎤 Telefondaki Vokal Sesiyle Senkron"
+              : "🎙️ Telefondaki Müzik Sesiyle Senkron";
+        } else if (typeof sr.matched_line_index === "number" && sr.matched_line_index >= 0) {
+          if (sr.matched_line_index !== activeLineIdx) {
+            highlightLineByIndex(sr.matched_line_index, true);
+          }
+          badgeSync.textContent = "🎤 Telefondaki Vokal Sesiyle Senkron";
+        }
+      }
+    } catch (_) {
+      // Ağ gecikmesinde mevcut akışı bozma
+    } finally {
+      isSyncAudioInFlight = false;
+    }
+  }
+
+  function startLiveMicSync() {
+    if (!mediaStream || !audioCtx) return;
+    isLiveMicSyncing = true;
+    lastSoundHeardPerfTime = performance.now();
+
+    // 1. Telefona gelen müzik kesildiğinde / duraklatıldığında sözlerin boşuna akmasını durdur
+    liveSilenceCheckId = setInterval(() => {
+      if (!isLiveMicSyncing || syncPaused || isSongFinished) return;
+      const silenceMs = performance.now() - lastSoundHeardPerfTime;
+      if (!autoSilencePaused && silenceMs > 4200) {
+        syncBaseOffsetSec = getCurrentPlaybackSec();
+        autoSilencePaused = true;
+        badgeSync.textContent = "🔇 Telefona Ses Gelmiyor (Bekleniyor)";
+      } else if (autoSilencePaused && silenceMs < 600) {
+        syncStartPerfTime = performance.now();
+        autoSilencePaused = false;
+        badgeSync.textContent = "🎙️ Telefon Sesiyle Canlı Senkron";
+      }
+    }, 300);
+
+    // 2. Her 4.2 saniyede bir telefondan gelen canlı müzik/vokal ile sözlerin saniyesini hizala
+    liveMicSyncTimerId = setInterval(pollLiveAudioSync, 4200);
   }
 
   function updateSyncedHighlight() {
@@ -790,7 +938,7 @@
     // Şarkı tamamlandıysa (son satırdan 6 saniye sonra veya süre aşıldığında) akışı durdur
     if (nowSec >= lastLineTime + 6) {
       isSongFinished = true;
-      stopKaraokeSync();
+      stopKaraokeSync(true);
       syncTimerText.textContent = `${formatTime(lastLineTime)} (Tamamlandı)`;
       btnSyncPause.textContent = "🔄 Baştan";
       if (btnStopSync) btnStopSync.textContent = "🔄 Baştan";
@@ -798,7 +946,7 @@
       return;
     }
 
-    let foundIdx = -1;
+    let foundIdx = 0;
     // Karaoke Modu: Satırın vuruşu (t) gelmeden 1.1 saniye önce ekranda aktif hale getir!
     for (let i = 0; i < lines.length; i++) {
       const t = lines[i].time;
@@ -809,15 +957,16 @@
       }
     }
 
-    if (foundIdx !== -1 && foundIdx !== activeLineIdx) {
+    if (foundIdx !== activeLineIdx) {
       highlightLineByIndex(foundIdx, true);
     }
   }
 
   function startKaraokeSync() {
-    stopKaraokeSync();
+    stopKaraokeSync(false);
     activeLineIdx = -1;
     syncPaused = false;
+    autoSilencePaused = false;
     isSongFinished = false;
     btnSyncPause.textContent = "⏸ Duraklat";
     if (btnStopSync) btnStopSync.textContent = "⏹️ Akışı Durdur";
@@ -846,13 +995,13 @@
       }
       syncStartPerfTime = performance.now();
       updateSyncedHighlight();
-      syncIntervalId = setInterval(updateSyncedHighlight, 200);
+      syncIntervalId = setInterval(updateSyncedHighlight, 180);
     } else {
       // Senkronize (LRC) zaman damgası olmayan düz şarkılarda yakalanan satıra odaklan
       // ve her 4.5 saniyede bir sonraki satıra yumuşakça ilerle
       highlightLineByIndex(initialIdx, false);
       plainScrollIntervalId = setInterval(() => {
-        if (!autoScrollEnabled || syncPaused || isSongFinished) return;
+        if (!autoScrollEnabled || syncPaused || autoSilencePaused || isSongFinished) return;
         const nextIdx = activeLineIdx + 1;
         if (currentSong && currentSong.lines) {
           if (nextIdx < currentSong.lines.length) {
@@ -860,13 +1009,16 @@
           } else {
             // Şarkı sözlerinin sonuna ulaşıldı
             isSongFinished = true;
-            stopKaraokeSync();
+            stopKaraokeSync(true);
             if (btnStopSync) btnStopSync.textContent = "🔄 Baştan";
             btnSyncPause.textContent = "🔄 Baştan";
           }
         }
       }, 4500);
     }
+
+    // Telefondan gelen canlı sesle sürekli senkronizasyonu başlat
+    startLiveMicSync();
   }
 
   // Türkçe Çeviri Düğmesi
@@ -947,8 +1099,9 @@
 
   // Şarkı Ekranını Kapatıp Ana Ekrana Dön
   function closeLyricsView() {
-    stopKaraokeSync();
+    stopKaraokeSync(true);
     currentSong = null;
+    document.body.classList.remove("lyrics-active");
     lyricsSection.classList.add("hidden");
     listenSection.classList.remove("hidden");
     statusMessage.textContent = "Hazır. Şarkıyı dinletmek için dokunun veya arama kutusuna yazın.";
