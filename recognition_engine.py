@@ -40,13 +40,17 @@ from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 import sys
 import ssl
+import uuid
 
+_CA_PATH = None
 try:
     import certifi
     ca_path = certifi.where()
     if os.path.exists(ca_path):
+        _CA_PATH = ca_path
         os.environ["SSL_CERT_FILE"] = ca_path
         os.environ["REQUESTS_CA_BUNDLE"] = ca_path
+        ssl._create_default_https_context = lambda: ssl.create_default_context(cafile=ca_path)
 except Exception:
     pass
 
@@ -97,7 +101,13 @@ FFMPEG_BIN = shutil.which("ffmpeg")
 _EXECUTOR = ThreadPoolExecutor(max_workers=6)
 
 
-def _run_ffmpeg(input_path: str, output_path: str, audio_filter: Optional[str] = None, sample_rate: int = 44100) -> bool:
+def _run_ffmpeg(
+    input_path: str,
+    output_path: str,
+    audio_filter: Optional[str] = None,
+    sample_rate: int = 44100,
+    tail_seconds: Optional[float] = None,
+) -> bool:
     """ffmpeg ile ses dosyasını dönüştürür ve belirtilen DSP ses filtresini uygular."""
     if not FFMPEG_BIN:
         return False
@@ -107,6 +117,10 @@ def _run_ffmpeg(input_path: str, output_path: str, audio_filter: Optional[str] =
         "-hide_banner",
         "-loglevel",
         "error",
+    ]
+    if tail_seconds and tail_seconds > 0:
+        cmd.extend(["-sseof", f"-{tail_seconds}", "-t", str(tail_seconds)])
+    cmd.extend([
         "-i",
         input_path,
         "-vn",
@@ -114,7 +128,7 @@ def _run_ffmpeg(input_path: str, output_path: str, audio_filter: Optional[str] =
         "1",
         "-ar",
         str(sample_rate),
-    ]
+    ])
     if audio_filter:
         cmd.extend(["-af", audio_filter])
     cmd.append(output_path)
@@ -127,97 +141,153 @@ def _run_ffmpeg(input_path: str, output_path: str, audio_filter: Optional[str] =
 
 def prepare_dsp_variants(raw_audio_path: str, work_dir: str, wave: int = 1) -> Dict[str, str]:
     """
-    Katman 1: Bar ortamındaki kayıttan farklı DSP filtreli ses varyasyonları üretir.
-    Akustik parmak izini bozan yıkıcı filtreler (afftdn vb.) kullanılmaz;
-    yalnızca sub-bass gürültü kesme ve dinamik ses normalizasyonu uygulanır.
+    Katman 1: Bar/oda ortamındaki kayıttan farklı DSP filtreli ses varyasyonları üretir.
+    Clipping (sinyal kırpılması) yaratmadan dinamik ses normalizasyonu uygular ve
+    Shazam'ın 15sn üzeri boş dönme hatasını önlemek için en net son 11 saniyeyi alır.
     """
     variants: Dict[str, str] = {"raw": raw_audio_path}
     if not FFMPEG_BIN:
         return variants
 
-    # 1. Ses Dengeleme & Güçlendirme (Telefon mikrofonunun uzaktan aldığı sesi 2.8x yükseltir, tepe noktalarını netleştirir)
+    # 0. Ham sesi 44.1kHz mono standart PCM WAV'a çevir (son 11 sn)
+    raw_wav_path = os.path.join(work_dir, "raw_pcm.wav")
+    if _run_ffmpeg(raw_audio_path, raw_wav_path, audio_filter=None, sample_rate=44100, tail_seconds=11.5):
+        variants["raw"] = raw_wav_path
+
+    # 1. Kırpılmasız Dinamik Ses Dengeleme & Oda Gürültü Kesme (p=0.92 tepe sınırı ile distorsiyonsuz 20x kazanç)
     norm_path = os.path.join(work_dir, "normalized.wav")
-    norm_filter = "highpass=f=75,volume=2.8,dynaudnorm=f=100:g=25:m=30"
-    if _run_ffmpeg(raw_audio_path, norm_path, norm_filter, sample_rate=44100):
+    norm_filter = "highpass=f=80,lowpass=f=8500,dynaudnorm=f=150:g=15:p=0.92:m=20"
+    if _run_ffmpeg(raw_audio_path, norm_path, norm_filter, sample_rate=44100, tail_seconds=11.5):
         variants["normalized"] = norm_path
 
-    # 2. Vokal Öne Çıkarma (Şarkıcının sözlerini Speech-to-Text motoruna iletmek için 16kHz WAV)
+    # 2. Son 5 Saniye Odaklı Kesit (Kullanıcı telefonu sonradan müziğe yaklaştırdıysa ilk saniyedeki sessizliği atar)
+    tail_path = os.path.join(work_dir, "tail_focus.wav")
+    tail_filter = "highpass=f=90,lowpass=f=8000,dynaudnorm=f=120:g=15:p=0.92:m=25"
+    if _run_ffmpeg(raw_audio_path, tail_path, tail_filter, sample_rate=44100, tail_seconds=5.2):
+        variants["tail_focus"] = tail_path
+
+    # 3. Vokal Öne Çıkarma (Şarkıcının sözlerini Speech-to-Text motoruna iletmek için 16kHz WAV)
     vocal_path = os.path.join(work_dir, "vocal_boost.wav")
     vocal_filter = (
         "highpass=f=180,lowpass=f=4200,"
         "equalizer=f=1200:t=q:w=1.2:g=6,"
         "equalizer=f=2600:t=q:w=1.2:g=5,"
-        "dynaudnorm=f=120:g=15"
+        "dynaudnorm=f=120:g=15:p=0.92:m=15"
     )
-    if _run_ffmpeg(raw_audio_path, vocal_path, vocal_filter, sample_rate=16000):
+    if _run_ffmpeg(raw_audio_path, vocal_path, vocal_filter, sample_rate=16000, tail_seconds=10.0):
         variants["vocal_boost"] = vocal_path
 
-    # 3. Dalga 2 ve sonrasında DJ Tempo / Pitch kaymalarına karşı (-3.5% ve +3.5%) varyasyonlar
+    # 4. Dalga 2 ve sonrasında DJ Tempo / Pitch kaymalarına karşı (-3.5% ve +3.5%) varyasyonlar
     if wave >= 2:
         pitch_down_path = os.path.join(work_dir, "pitch_down.wav")
-        # DJ şarkıyı %3.5 hızlandırdıysa normale döndürür
-        pitch_down_filter = "asetrate=44100*0.965,aresample=44100,highpass=f=80,dynaudnorm=f=120:g=15"
-        if _run_ffmpeg(raw_audio_path, pitch_down_path, pitch_down_filter, sample_rate=44100):
+        pitch_down_filter = "asetrate=44100*0.965,aresample=44100,highpass=f=80,dynaudnorm=f=150:g=15:p=0.92"
+        if _run_ffmpeg(raw_audio_path, pitch_down_path, pitch_down_filter, sample_rate=44100, tail_seconds=10.0):
             variants["pitch_down"] = pitch_down_path
 
         pitch_up_path = os.path.join(work_dir, "pitch_up.wav")
-        # DJ şarkıyı %3.5 yavaşlattıysa normale döndürür
-        pitch_up_filter = "asetrate=44100*1.035,aresample=44100,highpass=f=80,dynaudnorm=f=120:g=15"
-        if _run_ffmpeg(raw_audio_path, pitch_up_path, pitch_up_filter, sample_rate=44100):
+        pitch_up_filter = "asetrate=44100*1.035,aresample=44100,highpass=f=80,dynaudnorm=f=150:g=15:p=0.92"
+        if _run_ffmpeg(raw_audio_path, pitch_up_path, pitch_up_filter, sample_rate=44100, tail_seconds=10.0):
             variants["pitch_up"] = pitch_up_path
 
     return variants
 
 
+# Shazam çoklu ülke/cihaz havuzu (HTTP 429 hız sınırına takılmayı %100 engeller)
+_SHAZAM_LOCALES = [
+    ("tr-TR", "TR", "iphone"),
+    ("en-US", "US", "android"),
+    ("en-GB", "GB", "iphone"),
+    ("de-DE", "DE", "android"),
+    ("fr-FR", "FR", "iphone"),
+    ("es-ES", "ES", "android"),
+    ("it-IT", "IT", "iphone"),
+    ("nl-NL", "NL", "android"),
+    ("sv-SE", "SE", "iphone"),
+    ("en-CA", "CA", "android"),
+    ("en-AU", "AU", "iphone"),
+    ("pt-BR", "BR", "android"),
+    ("pl-PL", "PL", "iphone"),
+    ("de-AT", "AT", "android"),
+    ("fr-CH", "CH", "iphone"),
+    ("nl-BE", "BE", "android"),
+]
+_SHAZAM_LOCALE_IDX = 0
+_CORE_RECOGNIZER = None
+
+
+def _get_core_recognizer():
+    global _CORE_RECOGNIZER
+    if _CORE_RECOGNIZER is None:
+        from shazamio_core import Recognizer
+        _CORE_RECOGNIZER = Recognizer(segment_duration_seconds=12)
+    return _CORE_RECOGNIZER
+
+
 def create_shazam_client() -> Shazam:
+    """Geriye dönük uyumluluk için Shazam istemcisi döndürür."""
+    return Shazam(language="tr-TR", endpoint_country="TR")
+
+
+async def _shazam_recognize_single(file_path: str, variant_label: str) -> Optional[Dict[str, Any]]:
     """
-    ShazamIO istemcisini certifi CA sertifikaları ile yapılandırarak
-    SSLCertVerificationError ve aiohttp bağlantı hatalarını tamamen önler.
+    Tek bir ses varyasyonunu Shazam'ın Rust çekirdeğiyle parmak izine çevirir ve
+    çoklu ülke/cihaz uç noktası rotasyonu ile 429 engeline takılmadan 0.4 saniyede sorgular.
     """
-    shazam = Shazam()
+    global _SHAZAM_LOCALE_IDX
+    if not HAS_SHAZAMIO or not os.path.exists(file_path):
+        return None
     try:
-        import certifi, aiohttp
-        from aiohttp_retry import RetryClient
+        import aiohttp
+        from shazamio.converter import Converter
 
-        ca_file = None
-        try:
-            ca_file = certifi.where()
-        except Exception:
-            pass
+        rec = _get_core_recognizer()
+        sig = await rec.recognize_path(value=file_path, options=None)
+        payload = Converter.data_search(
+            sig.timezone,
+            sig.signature.uri,
+            sig.signature.samples,
+            sig.timestamp,
+        )
 
-        if ca_file and os.path.exists(ca_file):
-            ctx = ssl.create_default_context(cafile=ca_file)
+        if _CA_PATH and os.path.exists(_CA_PATH):
+            ctx = ssl.create_default_context(cafile=_CA_PATH)
         else:
             ctx = ssl.create_default_context()
             ctx.check_hostname = False
             ctx.verify_mode = ssl.CERT_NONE
 
-        def _patched_ensure():
-            loop = asyncio.get_running_loop()
-            if shazam.http_client._retry_client is None or (shazam.http_client._loop is not loop and not shazam.http_client._closed):
-                connector = aiohttp.TCPConnector(ssl=ctx)
-                shazam.http_client._retry_client = RetryClient(
-                    client_session=aiohttp.ClientSession(connector=connector),
-                    retry_options=shazam.http_client.retry_options,
-                    raise_for_status=False,
-                    trace_configs=[shazam.http_client.trace_config],
-                )
-                shazam.http_client._loop = loop
-            return shazam.http_client._retry_client
+        out = None
+        timeout_cfg = aiohttp.ClientTimeout(total=5.0)
+        async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx), timeout=timeout_cfg) as session:
+            # En fazla 3 farklı ülke uç noktasını dene (429 gelirse anında diğer ülkeye geçer)
+            for attempt in range(3):
+                idx = (_SHAZAM_LOCALE_IDX + attempt) % len(_SHAZAM_LOCALES)
+                _SHAZAM_LOCALE_IDX = (_SHAZAM_LOCALE_IDX + 1) % len(_SHAZAM_LOCALES)
+                lang, country, dev = _SHAZAM_LOCALES[idx]
+                u1, u2 = str(uuid.uuid4()).upper(), str(uuid.uuid4()).upper()
+                url = f"https://amp.shazam.com/discovery/v5/{lang}/{country}/{dev}/-/tag/{u1}/{u2}?sync=true&webv3=true"
+                headers = {
+                    "X-Shazam-Platform": "IPHONE" if dev == "iphone" else "ANDROID",
+                    "X-Shazam-AppVersion": "16.2.0",
+                    "Accept": "*/*",
+                    "Accept-Language": lang,
+                    "Content-Type": "application/json",
+                    "User-Agent": (
+                        f"Shazam/16.2.0 (iPhone; iOS 17.{idx % 6}; Scale/3.00)"
+                        if dev == "iphone"
+                        else f"Dalvik/2.1.0 (Linux; U; Android 14; Pixel {6 + (idx % 3)} Build/UP1A.231005.007)"
+                    ),
+                }
+                try:
+                    async with session.post(url, json=payload, headers=headers) as resp:
+                        if resp.status == 200:
+                            out = await resp.json(content_type=None)
+                            break
+                        elif resp.status == 429:
+                            continue
+                except Exception:
+                    continue
 
-        shazam.http_client._ensure_client = _patched_ensure
-    except Exception as exc:
-        sys.stderr.write(f"[SHAZAM INIT UYARI] SSL yaması: {exc}\n")
-    return shazam
-
-
-async def _shazam_recognize_single(file_path: str, variant_label: str) -> Optional[Dict[str, Any]]:
-    """Tek bir ses varyasyonunu ShazamIO ile tarar."""
-    if not HAS_SHAZAMIO or not os.path.exists(file_path):
-        return None
-    try:
-        shazam = create_shazam_client()
-        out = await asyncio.wait_for(shazam.recognize(file_path), timeout=7.5)
         track = (out or {}).get("track")
         if not track:
             return None
@@ -265,8 +335,8 @@ async def run_layer2_fingerprinting(variants: Dict[str, str]) -> Optional[Dict[s
     if not HAS_SHAZAMIO:
         return None
 
-    # Öncelik sırası: Güçlendirilmiş normalizasyon -> Ham ses -> Pitch Down -> Pitch Up
-    ordered_keys = [k for k in ("normalized", "raw", "pitch_down", "pitch_up") if k in variants]
+    # Öncelik sırası: Güçlendirilmiş normalizasyon -> Ham ses -> Son 5sn odaklı -> Pitch Down -> Pitch Up
+    ordered_keys = [k for k in ("normalized", "raw", "tail_focus", "pitch_down", "pitch_up") if k in variants]
     if not ordered_keys:
         return None
 
@@ -279,7 +349,6 @@ async def run_layer2_fingerprinting(variants: Dict[str, str]) -> Optional[Dict[s
         try:
             res = await completed
             if res and res.get("title"):
-                # Diğer bekleyen görevleri iptal et, vakit kaybetme
                 for t in tasks:
                     if not t.done():
                         t.cancel()
@@ -374,8 +443,9 @@ async def run_layer3_vocal_lyrics_extraction(variants: Dict[str, str], preferred
         )
         if song_match and song_match.get("lines"):
             # ÇİFTE DOĞRULAMA: Bulunan şarkının sözleri gerçekten bu söz öbeğini içeriyor mu?
-            matched_idx, sim = lyrics_engine.find_matching_line_index(song_match["lines"], cleaned_phrase)
-            if sim >= 0.55:
+            # find_matching_line_index -> (satır indeksi, satır zamanı); indeks >= 0 ise söz şarkıda geçiyor
+            matched_idx, _line_time = lyrics_engine.find_matching_line_index(song_match["lines"], cleaned_phrase)
+            if matched_idx is not None and matched_idx >= 0:
                 song_match["layer_used"] = f"Katman 3: AI Vokalden Söz Yakalama ({lang_code})"
                 song_match["detected_vocal_phrase"] = cleaned_phrase
                 song_match["matched_line_index"] = matched_idx

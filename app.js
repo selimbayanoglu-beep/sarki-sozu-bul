@@ -100,8 +100,27 @@
   let plainScrollIntervalId = null;
   let fontSizeRem = 1.45;
 
-  // Sunucu durumu ve HTTPS kontrolü
+  // Sunucu durumu, HTTPS kontrolü ve Otomatik Güncel Motor Yönlendirmesi
   let serverStatus = { https_port: 8892, tunnel_url: "" };
+  const UPGRADED_TUNNEL_API = "https://happy-times-plane-deborah.trycloudflare.com";
+  let activeApiBase =
+    location.hostname === "159.195.255.168" ||
+    location.hostname === "lately-nokia-removable-cups.trycloudflare.com"
+      ? UPGRADED_TUNNEL_API
+      : "";
+
+  async function apiFetch(path, options = {}) {
+    const primaryUrl = `${activeApiBase}${path}`;
+    try {
+      const resp = await fetch(primaryUrl, options);
+      if (resp.ok || !activeApiBase) {
+        return resp;
+      }
+    } catch (err) {
+      if (err && err.name === "AbortError") throw err;
+    }
+    return fetch(path, options);
+  }
 
   async function checkServerAndHttps() {
     async function fetchStatus() {
@@ -110,6 +129,17 @@
         const data = await res.json();
         if (data && data.ok) {
           serverStatus = data;
+          // Eğer mevcut sunucuda YouTube Music motoru henüz aktif değilse (konteyner restart edilmediyse)
+          // API isteklerini otomatik olarak güncel canlı motora yönlendir
+          if (!data.engines || !data.engines.ytmusic) {
+            try {
+              const upRes = await fetch(`${UPGRADED_TUNNEL_API}/api/status`);
+              const upData = await upRes.json();
+              if (upData && upData.ok && upData.engines && upData.engines.ytmusic) {
+                activeApiBase = UPGRADED_TUNNEL_API;
+              }
+            } catch (_) {}
+          }
           if (data.tunnel_url) {
             httpsRedirectLink.href = data.tunnel_url;
             httpsRedirectLink.textContent = "🔒 Canlı Mikrofon İçin Aç (HTTPS)";
@@ -130,7 +160,6 @@
     if (!isSecure) {
       httpsBanner.classList.remove("hidden");
       if (!hasTunnel) {
-        // Tünel hazırlanıyorsa 2 sn aralıklarla kontrol et
         let attempts = 0;
         const interval = setInterval(async () => {
           attempts++;
@@ -209,6 +238,72 @@
     return merged.slice(merged.length - neededSamples);
   }
 
+  // Uzak mikrofon sinyallerini kırpmadan (clipping yapmadan) ideal seviyeye yükseltir
+  function normalizeSamples(samples) {
+    let maxPeak = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const abs = Math.abs(samples[i]);
+      if (abs > maxPeak) maxPeak = abs;
+    }
+    if (maxPeak <= 0.0001 || maxPeak >= 0.55) {
+      return { samples, maxPeak };
+    }
+    const gain = Math.min(24.0, 0.82 / maxPeak);
+    const out = new Float32Array(samples.length);
+    for (let i = 0; i < samples.length; i++) {
+      out[i] = Math.max(-1, Math.min(1, samples[i] * gain));
+    }
+    return { samples: out, maxPeak };
+  }
+
+  // MediaRecorder segmentini sonlandırıp geçerli bir kapsayıcı (MP4/WebM) üretir ve yenisini başlatır
+  function flushMediaRecorderBlob() {
+    return new Promise((resolve) => {
+      if (!mediaRecorder || mediaRecorder.state === "inactive") {
+        if (recordedMediaChunks.length > 0) {
+          const mime = (mediaRecorder && mediaRecorder.mimeType) || "audio/webm";
+          resolve({
+            blob: new Blob(recordedMediaChunks, { type: mime }),
+            mime,
+            ext: mime.includes("mp4") ? ".mp4" : ".webm",
+          });
+        } else {
+          resolve(null);
+        }
+        return;
+      }
+      const mime = mediaRecorder.mimeType || "audio/webm";
+      const onStop = () => {
+        const chunks = recordedMediaChunks.slice();
+        recordedMediaChunks = [];
+        if (isListening && mediaStream) {
+          try {
+            mediaRecorder = new MediaRecorder(mediaStream, mime ? { mimeType: mime } : undefined);
+            mediaRecorder.ondataavailable = (e) => {
+              if (e.data && e.data.size > 0) recordedMediaChunks.push(e.data);
+            };
+            mediaRecorder.start(400);
+          } catch (_) {}
+        }
+        if (chunks.length > 0) {
+          resolve({
+            blob: new Blob(chunks, { type: mime }),
+            mime,
+            ext: mime.includes("mp4") ? ".mp4" : ".webm",
+          });
+        } else {
+          resolve(null);
+        }
+      };
+      mediaRecorder.addEventListener("stop", onStop, { once: true });
+      try {
+        mediaRecorder.stop();
+      } catch (_) {
+        resolve(null);
+      }
+    });
+  }
+
   // Canlı Frekans Dalgası Çizimi
   function drawVisualizer() {
     const ctx = waveCanvas.getContext("2d");
@@ -275,23 +370,33 @@
     let uploadExt = ".wav";
     let uploadMime = "audio/wav";
 
-    // MediaRecorder veri topladıysa onu kullan (telefonun donanım ses kodlayıcısı)
-    if (recordedMediaChunks.length > 0) {
-      const mime = (mediaRecorder && mediaRecorder.mimeType) || "audio/webm";
-      uploadBlob = new Blob(recordedMediaChunks, { type: mime });
-      uploadMime = mime;
-      uploadExt = mime.includes("mp4") ? ".mp4" : ".webm";
+    // Öncelik 1: Kayıpsız kayan pencere PCM WAV (her zaman son durationSec saniyeyi ve geçerli RIFF başlığını garantiler)
+    const rawSamples = getRecentSamples(durationSec);
+    if (rawSamples.length >= sampleRate * 1.0) {
+      const { samples: normSamples, maxPeak } = normalizeSamples(rawSamples);
+      if (maxPeak > 0.0001) {
+        uploadBlob = encodeWAV(normSamples, sampleRate);
+        uploadExt = ".wav";
+        uploadMime = "audio/wav";
+      }
     }
 
-    // MediaRecorder boşsa veya desteklenmiyorsa PCM WAV yedeği gönder
+    // Öncelik 2: WebAudio sessizse donanım MediaRecorder kapsayıcısını sonlandırıp gönder
     if (!uploadBlob || uploadBlob.size < 1000) {
-      const samples = getRecentSamples(durationSec);
-      if (samples.length < sampleRate * 1.0) {
-        return;
+      const flushed = await flushMediaRecorderBlob();
+      if (flushed && flushed.blob && flushed.blob.size > 500) {
+        uploadBlob = flushed.blob;
+        uploadMime = flushed.mime;
+        uploadExt = flushed.ext;
+      } else if (rawSamples.length >= sampleRate * 0.5) {
+        uploadBlob = encodeWAV(rawSamples, sampleRate);
+        uploadExt = ".wav";
+        uploadMime = "audio/wav";
       }
-      uploadBlob = encodeWAV(samples, sampleRate);
-      uploadExt = ".wav";
-      uploadMime = "audio/wav";
+    }
+
+    if (!uploadBlob || uploadBlob.size < 400) {
+      return;
     }
 
     const waveCapturedAt = performance.now();
@@ -299,7 +404,7 @@
     currentAbortControllers.push(controller);
 
     try {
-      const resp = await fetch("/api/recognize", {
+      const resp = await apiFetch("/api/recognize", {
         method: "POST",
         headers: {
           "Content-Type": uploadMime,
@@ -368,10 +473,26 @@
       return;
     }
 
+    // iOS Safari ve mobil tarayıcılarda kullanıcı dokunuşu (user gesture) kaybolmadan
+    // AudioContext'i getUserMedia öncesinde senkron olarak oluştur ve uyandır
+    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+    if (AudioContextClass) {
+      try {
+        if (!audioCtx || audioCtx.state === "closed") {
+          audioCtx = new AudioContextClass();
+        }
+        if (audioCtx.state === "suspended") {
+          audioCtx.resume().catch(() => {});
+        }
+      } catch (_) {}
+    }
+
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
           channelCount: 1,
+          echoCancellation: false,
+          noiseSuppression: false,
           autoGainControl: true,
         },
       });
@@ -394,7 +515,7 @@
     detectedWordsBox.classList.add("hidden");
     detectedWordsText.textContent = "";
 
-    // Donanım seviyesinde MediaRecorder (iOS ve Android için kayıpsız ses yakalama)
+    // Donanım seviyesinde MediaRecorder (iOS ve Android için yedek ses yakalama)
     mediaRecorder = null;
     if (typeof MediaRecorder !== "undefined") {
       let mime = "";
@@ -425,8 +546,9 @@
     statusMessage.textContent = "Müzik taranıyor (Shazam & YouTube Music)...";
     setLayerPills(1);
 
-    const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-    audioCtx = new AudioContextClass();
+    if (!audioCtx || audioCtx.state === "closed") {
+      audioCtx = new AudioContextClass();
+    }
     if (audioCtx.state === "suspended") {
       try {
         await audioCtx.resume();
@@ -449,19 +571,24 @@
       }
     };
 
+    // Hoparlörden geri besleme (feedback) yapmadan işlemciyi canlı tutmak için sıfır kazançlı düğüm
+    const silentGain = audioCtx.createGain();
+    silentGain.gain.value = 0;
+
     sourceNode.connect(analyserNode);
     analyserNode.connect(processorNode);
-    processorNode.connect(audioCtx.destination);
+    processorNode.connect(silentGain);
+    silentGain.connect(audioCtx.destination);
 
     drawVisualizer();
 
-    // Kayan Pencere Dalga Zamanlayıcıları
+    // Kayan Pencere Dalga Zamanlayıcıları (Shazam 12sn pencere sınırına tam uyumlu)
     waveTimers = [
-      setTimeout(() => sendAudioWave(1, 3.8), 3400),
-      setTimeout(() => sendAudioWave(2, 5.5), 6200),
-      setTimeout(() => sendAudioWave(3, 7.5), 9800),
-      setTimeout(() => sendAudioWave(4, 9.5), 13800),
-      setTimeout(() => sendAudioWave(5, 12.0), 18000),
+      setTimeout(() => sendAudioWave(1, 3.8), 3200),
+      setTimeout(() => sendAudioWave(2, 5.5), 5800),
+      setTimeout(() => sendAudioWave(3, 7.5), 9000),
+      setTimeout(() => sendAudioWave(4, 9.5), 12800),
+      setTimeout(() => sendAudioWave(5, 11.2), 16800),
     ];
   }
 
@@ -766,7 +893,7 @@
 
     btnTranslate.textContent = "⏳ Çevriliyor...";
     try {
-      const resp = await fetch("/api/translate", {
+      const resp = await apiFetch("/api/translate", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -902,7 +1029,7 @@
     const ext = extMatch ? extMatch[0] : ".m4a";
 
     try {
-      const resp = await fetch("/api/recognize", {
+      const resp = await apiFetch("/api/recognize", {
         method: "POST",
         headers: {
           "Content-Type": file.type || "application/octet-stream",
@@ -935,7 +1062,7 @@
 
     statusMessage.textContent = `"${q}" için şarkı ve sözler aranıyor...`;
     try {
-      const resp = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+      const resp = await apiFetch(`/api/search?q=${encodeURIComponent(q)}`);
       const data = await resp.json();
       if (data && data.ok && data.result) {
         searchInput.value = "";
@@ -954,7 +1081,7 @@
     historyModal.classList.remove("hidden");
     historyList.innerHTML = '<p class="empty-state">Yükleniyor...</p>';
     try {
-      const resp = await fetch("/api/history");
+      const resp = await apiFetch("/api/history");
       const data = await resp.json();
       const items = (data && data.items) || [];
       if (items.length === 0) {
@@ -990,7 +1117,7 @@
   });
 
   btnClearHistory.addEventListener("click", async () => {
-    await fetch("/api/history", { method: "DELETE" });
+    await apiFetch("/api/history", { method: "DELETE" });
     historyList.innerHTML = '<p class="empty-state">Geçmiş temizlendi.</p>';
   });
 

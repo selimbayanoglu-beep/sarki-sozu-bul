@@ -27,17 +27,18 @@ USER_AGENT = (
 
 
 def _build_ssl_context() -> ssl.SSLContext:
+    try:
+        import certifi
+        return ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
     for cafile in ("/etc/ssl/cert.pem", "/etc/ssl/certs/ca-certificates.crt"):
         if os.path.exists(cafile):
             try:
                 return ssl.create_default_context(cafile=cafile)
             except Exception:
                 pass
-    try:
-        import certifi
-        return ssl.create_default_context(cafile=certifi.where())
-    except Exception:
-        return ssl._create_unverified_context()
+    return ssl._create_unverified_context()
 
 
 _SSL_CTX = _build_ssl_context()
@@ -516,17 +517,23 @@ def get_full_lyrics_for_track(
     """
     result = search_lrclib_by_track(title, artist)
 
-    if not result:
+    if not result or not result.get("lines"):
         # YouTube Music resmi şarkı ve söz veritabanı
-        result = search_ytmusic_song_and_lyrics(f"{artist} {title}".strip())
+        yt_res = search_ytmusic_song_and_lyrics(f"{artist} {title}".strip())
+        if yt_res and yt_res.get("lines"):
+            result = yt_res
 
-    if not result:
-        result = search_genius_lyrics(f"{artist} {title}".strip())
+    if not result or not result.get("lines"):
+        gen_res = search_genius_lyrics(f"{artist} {title}".strip())
+        if gen_res and gen_res.get("lines"):
+            result = gen_res
 
-    if not result and artist:
-        result = search_lyrics_ovh(title, artist)
+    if (not result or not result.get("lines")) and artist:
+        ovh_res = search_lyrics_ovh(title, artist)
+        if ovh_res and ovh_res.get("lines"):
+            result = ovh_res
 
-    if not result and shazam_lyrics:
+    if (not result or not result.get("lines")) and shazam_lyrics:
         joined = "\n".join(shazam_lyrics)
         result = {
             "title": title,
