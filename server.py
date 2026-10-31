@@ -463,7 +463,19 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                     "updated": updated_files,
                     "errors": errors,
                 })
-            except Exception as e:
+
+                # Yeni kod ve rotaların devreye girmesi için süreci sıfır kesintiyle yeniden başlat
+                def _restart_process():
+                    time.sleep(0.6)
+                    try:
+                        record_log("🔄 Sunucu süreci yeni kod ile yeniden başlatılıyor (os.execv)...")
+                        os.execv(sys.executable, [sys.executable] + sys.argv)
+                    except Exception as re_err:
+                        record_log(f"Restart hatası: {re_err}")
+
+                import threading
+                threading.Thread(target=_restart_process, daemon=True).start()
+                return
                 self._send_json({"ok": False, "error": str(e)}, 500)
             return
 
