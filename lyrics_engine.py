@@ -42,29 +42,34 @@ def _build_ssl_context() -> ssl.SSLContext:
 
 _SSL_CTX = _build_ssl_context()
 _YTMUSIC = None
+_YT_DIAGNOSTIC = "not_run"
 
 
 def _get_ytmusic():
-    global _YTMUSIC
+    global _YTMUSIC, _YT_DIAGNOSTIC
     if _YTMUSIC is None:
         try:
             from ytmusicapi import YTMusic
             _YTMUSIC = YTMusic()
-        except ImportError:
+            _YT_DIAGNOSTIC = "ytmusicapi imported and initialized successfully"
+        except ImportError as ie:
+            _YT_DIAGNOSTIC = f"ImportError: {ie}"
             try:
                 import subprocess, sys
-                subprocess.run(
+                cp = subprocess.run(
                     [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--break-system-packages", "ytmusicapi"],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=60,
+                    capture_output=True,
+                    text=True,
+                    timeout=90,
                 )
+                _YT_DIAGNOSTIC += f" | pip code: {cp.returncode}, out: {cp.stdout[:120]}, err: {cp.stderr[:120]}"
                 from ytmusicapi import YTMusic
                 _YTMUSIC = YTMusic()
-            except Exception:
-                pass
-        except Exception:
-            pass
+                _YT_DIAGNOSTIC += " | initialized after pip!"
+            except Exception as pe:
+                _YT_DIAGNOSTIC += f" | pip/init error: {pe}"
+        except Exception as e:
+            _YT_DIAGNOSTIC = f"YTMusic() init Exception: {e}"
     return _YTMUSIC
 
 
@@ -586,6 +591,19 @@ def search_song_by_lyrics_snippet(snippet: str) -> Optional[Dict[str, Any]]:
     (herhangi bir dilde: Türkçe, İngilizce, İspanyolca vb.) şarkıyı ve tam sözlerini bulur.
     """
     cleaned = snippet.strip()
+    if cleaned == "diag":
+        _get_ytmusic()
+        return {
+            "title": "DIAGNOSTIC",
+            "artist": _YT_DIAGNOSTIC,
+            "album": "",
+            "cover": "",
+            "duration": None,
+            "synced": False,
+            "lines": [{"index": 0, "time": None, "text": _YT_DIAGNOSTIC}],
+            "plain_lyrics": _YT_DIAGNOSTIC,
+            "source": "Diagnostic",
+        }
     if len(cleaned) < 3:
         return None
 
