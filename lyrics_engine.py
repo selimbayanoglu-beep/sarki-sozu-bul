@@ -709,22 +709,11 @@ def translate_lyrics_to_turkish(lines: List[Dict[str, Any]], target_lang: str = 
 
 
 # Eğer bu modül çalışma esnasında reload ediliyorsa (örn. /api/pull-github çağrısı ile)
-# eksik paketleri kurup ana sunucu sürecini yeni kodla otomatik olarak yeniden başlatır.
+# ana sunucu sürecini yeni kodla anında yeniden başlatır.
 if globals().get("_IS_INITIALIZED_LYRICS_ENGINE"):
     def _on_reload_trigger():
-        import time, subprocess
-        try:
-            req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
-            if os.path.exists(req_file):
-                subprocess.run(
-                    [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--break-system-packages", "-r", req_file],
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                    timeout=90,
-                )
-        except Exception:
-            pass
-        time.sleep(1.0)
+        import time, os, sys
+        time.sleep(0.8)
         try:
             target_script = os.path.join(os.path.dirname(__file__), "server.py")
             if not os.path.exists(target_script):
