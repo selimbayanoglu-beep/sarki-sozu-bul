@@ -476,8 +476,9 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                 import threading
                 threading.Thread(target=_restart_process, daemon=True).start()
                 return
+            except Exception as e:
                 self._send_json({"ok": False, "error": str(e)}, 500)
-            return
+                return
 
         self._send_json({"ok": False, "error": "Bilinmeyen uç nokta"}, 404)
 
