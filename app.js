@@ -83,6 +83,7 @@
   let currentAbortControllers = [];
 
   // Karaoke & Söz Durumu
+  const KARAOKE_LEAD_SEC = 1.1; // Karaoke öncü gösterim: sözler söylenmeden 1.1 sn önce parlar ve hazır olur
   let currentSong = null;
   let translatedLinesCache = null;
   let showTranslation = false;
@@ -544,10 +545,10 @@
         div.appendChild(trSpan);
       }
 
-      // Satıra dokunulduğunda canlı senkronu o satıra hizala
+      // Satıra dokunulduğunda canlı senkronu o satıra hizala (karaoke için 1.1s önceden başlat)
       div.addEventListener("click", () => {
         if (currentSong && currentSong.synced && typeof lineObj.time === "number") {
-          syncBaseOffsetSec = lineObj.time;
+          syncBaseOffsetSec = Math.max(0, lineObj.time - KARAOKE_LEAD_SEC);
           syncStartPerfTime = performance.now();
           updateSyncedHighlight();
         } else {
@@ -572,8 +573,9 @@
     if (autoScrollEnabled && idx >= 0 && idx < children.length) {
       const activeEl = children[idx];
       const containerHeight = lyricsContainer.clientHeight;
+      // Aktif satırı ekranın üst üçte birlik hizasına getir ki yaklaşan satırlar rahatça okunsun
       const targetScroll =
-        activeEl.offsetTop - lyricsContainer.offsetTop - containerHeight * 0.35;
+        activeEl.offsetTop - lyricsContainer.offsetTop - containerHeight * 0.28;
       lyricsContainer.scrollTo({
         top: Math.max(0, targetScroll),
         behavior: smoothScroll ? "smooth" : "auto",
@@ -618,11 +620,12 @@
     }
 
     let foundIdx = -1;
+    // Karaoke Modu: Satırın vuruşu (t) gelmeden 1.1 saniye önce ekranda aktif hale getir!
     for (let i = 0; i < lines.length; i++) {
       const t = lines[i].time;
-      if (typeof t === "number" && t <= nowSec + 0.25) {
+      if (typeof t === "number" && t <= nowSec + KARAOKE_LEAD_SEC) {
         foundIdx = i;
-      } else if (typeof t === "number" && t > nowSec + 0.25) {
+      } else if (typeof t === "number" && t > nowSec + KARAOKE_LEAD_SEC) {
         break;
       }
     }

@@ -433,13 +433,14 @@ def get_full_lyrics_for_track(
         result["cover"] = cover
 
     # Şarkının o anki çalma saniyesi (offset) veya yakalanan söz kesiti varsa aktif satırı işaretle
+    # Karaoke öncü gösterim: Şarkıcı vuruşu kaçırmasın diye sözleri 1.1 saniye önceden hazırla
     matched_idx = -1
     if offset_seconds is not None and result.get("synced") and result.get("lines"):
         for idx, line in enumerate(result["lines"]):
             t = line.get("time")
-            if t is not None and t <= offset_seconds + 0.5:
+            if t is not None and t <= offset_seconds + 1.1:
                 matched_idx = idx
-            elif t is not None and t > offset_seconds + 0.5:
+            elif t is not None and t > offset_seconds + 1.1:
                 break
     elif offset_seconds is not None and not result.get("synced") and result.get("lines"):
         total_d = result.get("duration") or 210.0
