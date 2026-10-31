@@ -64,7 +64,7 @@ except ImportError:
     try:
         import subprocess
         subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--no-cache-dir", "ytmusicapi"],
+            [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--break-system-packages", "ytmusicapi"],
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
             timeout=60,
