@@ -517,15 +517,16 @@ async def recognize_music_pipeline(
                         for _lc, ph in vocal_res.get("detected_phrases") or []:
                             phrases_to_check.append(ph)
                         for ph in phrases_to_check:
-                            if len(ph.strip()) >= 8:
-                                v_idx, v_time = lyrics_engine.find_matching_line_index(full_lyrics["lines"], ph)
+                            if len(ph.strip()) >= 10:
+                                shazam_off = full_lyrics.get("offset_seconds")
+                                v_idx, v_time = lyrics_engine.find_matching_line_index(
+                                    full_lyrics["lines"], ph, hint_offset=shazam_off
+                                )
                                 if v_idx is not None and v_idx >= 0:
-                                    full_lyrics["matched_line_index"] = v_idx
                                     full_lyrics["detected_vocal_phrase"] = ph
-                                    if v_time is not None:
-                                        shazam_off = full_lyrics.get("offset_seconds")
-                                        # Eğer telefondan duyulan söz ile stüdyo kaydı arasında >2.5sn fark varsa telefondaki sese kilitle
-                                        if shazam_off is None or abs(shazam_off - (v_time + 1.5)) > 2.5:
+                                    if shazam_off is None:
+                                        full_lyrics["matched_line_index"] = v_idx
+                                        if v_time is not None:
                                             full_lyrics["offset_seconds"] = round(v_time + 1.5, 2)
                                     break
                 except Exception:
@@ -586,11 +587,12 @@ async def sync_live_audio_to_lyrics(
     title: str,
     artist: str,
     lines: List[Dict[str, Any]],
+    current_offset: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Şarkı sözleri ekranda akarken telefon mikrofonundan gelen canlı sesi (4 sn) analiz eder.
-    Hem şarkıcının söylediği kelimeleri (AI STT) hem de canlı akustik parmak izini (Shazam)
-    kontrol ederek sözleri internet saatine değil, telefondan gelen gerçek sese kilitler.
+    1. Öncelik: Canlı akustik parmak izi (Shazam) — 1., 2. ve 3. nakaratı milisaniye hassasiyetle ayırt eder.
+    2. Öncelik: Akustik iz bulunamazsa mevcut saniyeye (current_offset) komşu olan canlı vokal sözünü kullanır.
     """
     work_dir = tempfile.mkdtemp(prefix="sarki_sync_")
     try:
@@ -637,22 +639,8 @@ async def sync_live_audio_to_lyrics(
         except Exception:
             pass
 
-        # 1. Öncelik: Telefondan duyulan canlı vokal sözleri şarkının bir satırıyla eşleşiyor mu?
-        if stt_phrases and lines:
-            for _lang, phrase in stt_phrases:
-                cleaned = phrase.strip()
-                if len(cleaned) >= 6:
-                    m_idx, m_time = lyrics_engine.find_matching_line_index(lines, cleaned)
-                    if m_idx is not None and m_idx >= 0:
-                        return {
-                            "synced": True,
-                            "method": "vocal_live",
-                            "matched_line_index": m_idx,
-                            "offset_seconds": round(float(m_time) + 1.5, 2) if m_time is not None else None,
-                            "detected_phrase": cleaned,
-                        }
-
-        # 2. Öncelik: Telefondan duyulan müziğin akustik parmak izi saniyesi (Shazam live offset)
+        # 1. ÖNCELİK: Telefondan duyulan müziğin akustik parmak izi saniyesi (Shazam live offset)
+        # Akustik parmak izi nakarat tekrarlarında (1. nakarat vs 3. nakarat) asla yanılmaz ve yukarı-aşağı zıplama yapmaz!
         if fp_res and fp_res.get("title") and isinstance(fp_res.get("offset_seconds"), (int, float)):
             t1 = lyrics_engine.normalize_text(fp_res.get("title") or "")
             t2 = lyrics_engine.normalize_text(title or "")
@@ -663,6 +651,32 @@ async def sync_live_audio_to_lyrics(
                     "offset_seconds": fp_res["offset_seconds"],
                     "detected_phrase": stt_phrases[0][1] if stt_phrases else "",
                 }
+
+        # 2. ÖNCELİK: Sadece akustik iz eşleşmediyse ve net bir vokal cümlesi (en az 3 kelime) duyulduysa,
+        # mevcut saniyeye (current_offset) yakın olan satırı seç (eski nakarata geri zıplamayı engelle).
+        if stt_phrases and lines:
+            for _lang, phrase in stt_phrases:
+                cleaned = phrase.strip()
+                if len(cleaned) >= 12 and len(cleaned.split()) >= 3:
+                    m_idx, m_time = lyrics_engine.find_matching_line_index(
+                        lines, cleaned, hint_offset=current_offset
+                    )
+                    if m_idx is not None and m_idx >= 0:
+                        if (
+                            current_offset is not None
+                            and current_offset > 0
+                            and isinstance(m_time, (int, float))
+                        ):
+                            # Mevcut konumdan geriye veya çok uzağa zıplamasına izin verme
+                            if float(m_time) < current_offset - 3.5 or float(m_time) > current_offset + 9.0:
+                                continue
+                        return {
+                            "synced": True,
+                            "method": "vocal_live",
+                            "matched_line_index": m_idx,
+                            "offset_seconds": round(float(m_time) + 1.5, 2) if m_time is not None else None,
+                            "detected_phrase": cleaned,
+                        }
 
         return {
             "synced": False,

@@ -235,7 +235,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Wave, X-File-Ext, X-Lang, X-Track-Title, X-Track-Artist")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Wave, X-File-Ext, X-Lang, X-Track-Title, X-Track-Artist, X-Current-Offset")
         self.end_headers()
         self.wfile.write(payload)
 
@@ -243,7 +243,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Wave, X-File-Ext, X-Lang, X-Track-Title, X-Track-Artist")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Wave, X-File-Ext, X-Lang, X-Track-Title, X-Track-Artist, X-Current-Offset")
         self.end_headers()
 
     def do_GET(self) -> None:
@@ -367,6 +367,13 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                 file_ext = "." + file_ext
             raw_title = urllib.parse.unquote(self.headers.get("X-Track-Title", "") or "")
             raw_artist = urllib.parse.unquote(self.headers.get("X-Track-Artist", "") or "")
+            cur_off_str = self.headers.get("X-Current-Offset", "")
+            current_offset: Optional[float] = None
+            try:
+                if cur_off_str:
+                    current_offset = float(cur_off_str)
+            except ValueError:
+                current_offset = None
 
             # Geçmişten mevcut şarkının satırlarını bul
             lines_for_sync: List[Dict[str, Any]] = []
@@ -383,6 +390,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                         title=raw_title,
                         artist=raw_artist,
                         lines=lines_for_sync,
+                        current_offset=current_offset,
                     )
                 )
                 if sync_res.get("synced"):

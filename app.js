@@ -110,7 +110,7 @@
 
   // Sunucu durumu, HTTPS kontrolü ve Otomatik Güncel Motor Yönlendirmesi
   let serverStatus = { https_port: 8892, tunnel_url: "" };
-  const UPGRADED_TUNNEL_API = "https://periods-gravity-bases-diego.trycloudflare.com";
+  const UPGRADED_TUNNEL_API = "https://poll-maryland-programming-skirt.trycloudflare.com";
   let activeApiBase =
     location.hostname === "159.195.255.168" ||
     location.hostname === "lately-nokia-removable-cups.trycloudflare.com"
@@ -764,7 +764,7 @@
         if (currentSong && currentSong.synced && typeof lineObj.time === "number") {
           syncBaseOffsetSec = Math.max(0, lineObj.time - KARAOKE_LEAD_SEC);
           syncStartPerfTime = performance.now();
-          updateSyncedHighlight();
+          updateSyncedHighlight(true);
         } else {
           highlightLineByIndex(idx, true);
         }
@@ -855,6 +855,7 @@
 
     isSyncAudioInFlight = true;
     const capturePerf = performance.now();
+    const currentOffsetAtCapture = getCurrentPlaybackSec();
     const wavBlob = encodeWAV(normSamples, sampleRate);
 
     try {
@@ -865,6 +866,7 @@
           "X-File-Ext": ".wav",
           "X-Track-Title": encodeURIComponent(currentSong.title || ""),
           "X-Track-Artist": encodeURIComponent(currentSong.artist || ""),
+          "X-Current-Offset": String(currentOffsetAtCapture.toFixed(2)),
         },
         body: wavBlob,
       });
@@ -878,20 +880,36 @@
         if (currentSong.synced && typeof sr.offset_seconds === "number") {
           const livePhoneSec = Math.max(0, sr.offset_seconds + roundTripSec);
           const currentSec = getCurrentPlaybackSec();
-          // Eğer ekrandaki sayaç ile telefondan gelen gerçek ses arasında > 1.1 sn fark varsa anında gerçek sese hizala!
-          if (Math.abs(livePhoneSec - currentSec) > 1.1) {
-            syncBaseOffsetSec = livePhoneSec;
-            syncStartPerfTime = performance.now();
-            updateSyncedHighlight();
+          const drift = livePhoneSec - currentSec;
+
+          // Sadece ileri yönde veya anlamlı sapmalarda yumuşak düzeltme yap;
+          // sözlerin nakarat tekrarlarında yukarı-aşağı zıplamasını kesin olarak engelle!
+          if (sr.method === "acoustic_live") {
+            if (drift > 1.25 && drift < 25.0) {
+              syncBaseOffsetSec = currentSec + drift * 0.65;
+              syncStartPerfTime = performance.now();
+              updateSyncedHighlight(false);
+            } else if (drift < -1.8 && drift > -6.0) {
+              // Ekran sesten biraz öndeyse satırı geriye zıplatmadan sayacı yavaşça sese yaklaştır
+              syncBaseOffsetSec = currentSec + drift * 0.45;
+              syncStartPerfTime = performance.now();
+            }
+            badgeSync.textContent = "🎙️ Telefondaki Müzik Sesiyle Senkron";
+          } else if (sr.method === "vocal_live") {
+            if (drift > 1.2 && drift < 7.5) {
+              syncBaseOffsetSec = currentSec + drift * 0.5;
+              syncStartPerfTime = performance.now();
+              updateSyncedHighlight(false);
+            }
+            badgeSync.textContent = "🎤 Telefondaki Vokal Sesiyle Senkron";
           }
-          badgeSync.textContent =
-            sr.method === "vocal_live"
-              ? "🎤 Telefondaki Vokal Sesiyle Senkron"
-              : "🎙️ Telefondaki Müzik Sesiyle Senkron";
-        } else if (typeof sr.matched_line_index === "number" && sr.matched_line_index >= 0) {
-          if (sr.matched_line_index !== activeLineIdx) {
-            highlightLineByIndex(sr.matched_line_index, true);
-          }
+        } else if (
+          !currentSong.synced &&
+          typeof sr.matched_line_index === "number" &&
+          sr.matched_line_index > activeLineIdx &&
+          sr.matched_line_index <= activeLineIdx + 3
+        ) {
+          highlightLineByIndex(sr.matched_line_index, true);
           badgeSync.textContent = "🎤 Telefondaki Vokal Sesiyle Senkron";
         }
       }
@@ -926,7 +944,7 @@
     liveMicSyncTimerId = setInterval(pollLiveAudioSync, 4200);
   }
 
-  function updateSyncedHighlight() {
+  function updateSyncedHighlight(allowBackward = false) {
     if (!currentSong || !currentSong.synced || !currentSong.lines) return;
     const nowSec = getCurrentPlaybackSec();
     syncTimerText.textContent = formatTime(nowSec);
@@ -955,6 +973,11 @@
       } else if (typeof t === "number" && t > nowSec + KARAOKE_LEAD_SEC) {
         break;
       }
+    }
+
+    // Otomatik akış sırasında (kullanıcı elle geri sarmadıkça) sözlerin yukarı-aşağı zıplamasını engelle
+    if (!allowBackward && activeLineIdx >= 0 && foundIdx < activeLineIdx) {
+      foundIdx = activeLineIdx;
     }
 
     if (foundIdx !== activeLineIdx) {
@@ -1089,7 +1112,7 @@
   function adjustSync(deltaSec) {
     syncBaseOffsetSec = Math.max(0, getCurrentPlaybackSec() + deltaSec);
     syncStartPerfTime = performance.now();
-    updateSyncedHighlight();
+    updateSyncedHighlight(true);
   }
 
   if (btnSyncBack1) btnSyncBack1.addEventListener("click", () => adjustSync(-1.0));

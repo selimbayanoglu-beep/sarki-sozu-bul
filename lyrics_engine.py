@@ -298,10 +298,15 @@ def plain_to_lines(plain_lyrics: str) -> List[Dict[str, Any]]:
     return result
 
 
-def find_matching_line_index(lines: List[Dict[str, Any]], snippet: str) -> Tuple[int, Optional[float]]:
+def find_matching_line_index(
+    lines: List[Dict[str, Any]],
+    snippet: str,
+    hint_offset: Optional[float] = None,
+) -> Tuple[int, Optional[float]]:
     """
     Yakalanan söz kesitinin (snippet) şarkının hangi satırında geçtiğini bulur.
-    Hem satır indeksini hem de varsa saniyesini döndürür.
+    Nakarat tekrarlarında şarkının o anki saniyesine (hint_offset) en yakın satırı seçer;
+    böylece 2. veya 3. nakaratta 1. nakarata geri zıplamasını engeller.
     """
     if not lines or not snippet:
         return -1, None
@@ -318,21 +323,35 @@ def find_matching_line_index(lines: List[Dict[str, Any]], snippet: str) -> Tuple
         norm_line = normalize_text(line_text)
         if not norm_line:
             continue
-        if norm_snippet in norm_line or (len(norm_line) > 6 and norm_line in norm_snippet):
-            return idx, item.get("time")
 
-        line_words = set(norm_line.split())
-        if snippet_words and line_words:
-            overlap = len(snippet_words & line_words) / max(1, len(snippet_words))
+        if norm_snippet in norm_line or (len(norm_line) > 6 and norm_line in norm_snippet):
+            text_score = 0.96
         else:
-            overlap = 0.0
-        seq_ratio = SequenceMatcher(None, norm_snippet, norm_line).ratio()
-        score = max(overlap * 0.85, seq_ratio)
-        if score > best_score:
-            best_score = score
+            line_words = set(norm_line.split())
+            if snippet_words and line_words:
+                overlap = len(snippet_words & line_words) / max(1, len(snippet_words))
+            else:
+                overlap = 0.0
+            seq_ratio = SequenceMatcher(None, norm_snippet, norm_line).ratio()
+            text_score = max(overlap * 0.85, seq_ratio)
+
+        if text_score < 0.52:
+            continue
+
+        # Eğer şarkının mevcut saniyesi (hint_offset) biliniyorsa nakarat tekrarlarında en yakın satırı seç
+        line_time = item.get("time")
+        total_score = text_score
+        if hint_offset is not None and hint_offset > 0 and isinstance(line_time, (int, float)):
+            time_diff = abs(float(line_time) - float(hint_offset))
+            # Mevcut saniyeye yakın olan nakarat satırına öncelik ver, 20sn'den uzak eski nakaratları cezalandır
+            proximity_bonus = max(-0.35, 0.20 - (time_diff / 60.0))
+            total_score += proximity_bonus
+
+        if total_score > best_score:
+            best_score = total_score
             best_idx = idx
 
-    if best_score >= 0.45 and best_idx >= 0:
+    if best_score >= 0.52 and best_idx >= 0:
         return best_idx, lines[best_idx].get("time")
     return -1, None
 
