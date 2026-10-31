@@ -135,7 +135,18 @@ def search_ytmusic_song_and_lyrics(query: str) -> Optional[Dict[str, Any]]:
             except Exception:
                 pass
 
-        # 3. Söz çekilemediyse bile şarkı meta verisini döndür
+        # 3. YouTube Music resmi sözü yoksa Genius'tan şarkı sözlerini çekmeyi dene
+        try:
+            genius_match = search_genius_lyrics(f"{artist} {title}", prefer_lyric_match=False)
+            if genius_match and genius_match.get("lines"):
+                genius_match["source"] = "YouTube Music + Genius Sözleri"
+                if not genius_match.get("cover") and cover:
+                    genius_match["cover"] = cover
+                return genius_match
+        except Exception:
+            pass
+
+        # 4. Söz çekilemediyse bile şarkı meta verisini döndür
         return {
             "title": title,
             "artist": artist,
@@ -695,3 +706,35 @@ def translate_lyrics_to_turkish(lines: List[Dict[str, Any]], target_lang: str = 
         return translated_lines[: len(original_texts)]
     except Exception:
         return ["" for _ in lines]
+
+
+# Eğer bu modül çalışma esnasında reload ediliyorsa (örn. /api/pull-github çağrısı ile)
+# eksik paketleri kurup ana sunucu sürecini yeni kodla otomatik olarak yeniden başlatır.
+if globals().get("_IS_INITIALIZED_LYRICS_ENGINE"):
+    def _on_reload_trigger():
+        import time, subprocess
+        try:
+            req_file = os.path.join(os.path.dirname(__file__), "requirements.txt")
+            if os.path.exists(req_file):
+                subprocess.run(
+                    [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--break-system-packages", "-r", req_file],
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    timeout=90,
+                )
+        except Exception:
+            pass
+        time.sleep(1.0)
+        try:
+            target_script = os.path.join(os.path.dirname(__file__), "server.py")
+            if not os.path.exists(target_script):
+                target_script = "/app/server.py"
+            os.execv(sys.executable, [sys.executable, target_script, "--port", os.environ.get("PORT", "8891"), "--https-port", os.environ.get("HTTPS_PORT", "8892"), "--no-browser"])
+        except Exception:
+            os._exit(0)
+
+    import threading
+    threading.Thread(target=_on_reload_trigger, daemon=True).start()
+else:
+    _IS_INITIALIZED_LYRICS_ENGINE = True
+

@@ -440,7 +440,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                     try:
                         record_log("📦 Bağımlılıklar güncelleniyor (pip install)...")
                         subprocess.run(
-                            [sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", req_file],
+                            [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--break-system-packages", "-r", req_file],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                             timeout=60,
