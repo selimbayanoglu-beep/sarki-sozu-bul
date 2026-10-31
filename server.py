@@ -207,14 +207,25 @@ class ThreadedHTTPServer(socketserver.ThreadingMixIn, http.server.HTTPServer):
     allow_reuse_address = True
 
 
+_RECENT_LOGS: List[str] = []
+
+
+def record_log(msg: str) -> None:
+    global _RECENT_LOGS
+    line = f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}"
+    _RECENT_LOGS.append(line)
+    if len(_RECENT_LOGS) > 100:
+        _RECENT_LOGS.pop(0)
+    sys.stderr.write(line + "\n")
+
+
 class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=BASE_DIR, **kwargs)
 
     def log_message(self, fmt: str, *args: Any) -> None:
-        # Gereksiz statik dosya loglarını azalt
         if self.path.startswith("/api/"):
-            sys.stderr.write(f"[API] {self.command} {self.path} -> {args[1] if len(args) > 1 else ''}\n")
+            record_log(f"{self.command} {self.path} -> {args[1] if len(args) > 1 else ''}")
 
     def _send_json(self, data: Any, status: int = 200) -> None:
         payload = json.dumps(data, ensure_ascii=False).encode("utf-8")
@@ -247,10 +258,24 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                     "ffmpeg_dsp": bool(recognition_engine.FFMPEG_BIN),
                     "shazamio_fp": bool(recognition_engine.HAS_SHAZAMIO),
                     "vocal_ai_stt": bool(recognition_engine.HAS_SPEECH_REC),
+                    "ytmusic": bool(lyrics_engine._get_ytmusic()),
                     "lrclib_genius": True,
                 },
                 "https_port": int(os.environ.get("HTTPS_PORT", "8892")),
                 "tunnel_url": get_tunnel_url(),
+            })
+            return
+
+        if path == "/api/debug":
+            self._send_json({
+                "ok": True,
+                "engines": {
+                    "ffmpeg": bool(recognition_engine.FFMPEG_BIN),
+                    "shazam": bool(recognition_engine.HAS_SHAZAMIO),
+                    "speech_rec": bool(recognition_engine.HAS_SPEECH_REC),
+                    "ytmusic": bool(lyrics_engine._get_ytmusic()),
+                },
+                "logs": _RECENT_LOGS[-50:],
             })
             return
 
@@ -311,6 +336,8 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
             if not file_ext.startswith("."):
                 file_ext = "." + file_ext
 
+            record_log(f"🎙️ Gelen ses: {len(body)} bayt, Wave={wave_str}, Ext={file_ext}")
+
             try:
                 result = asyncio.run(
                     recognition_engine.recognize_music_pipeline(
@@ -321,9 +348,13 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                     )
                 )
                 if result.get("recognized") and result.get("title"):
+                    record_log(f"🎉 Şarkı bulundu: {result.get('title')} - {result.get('artist')} [{result.get('layer_used')}]")
                     save_to_history(result)
+                else:
+                    record_log(f"🔍 Dalga {wave_str} arandı ({result.get('elapsed_ms')}ms): Eşleşme yok.")
                 self._send_json({"ok": True, "result": result})
             except Exception as exc:
+                record_log(f"❌ Tanıma hatası: {exc}")
                 self._send_json({"ok": False, "error": f"Tanıma hatası: {exc}"}, 500)
             return
 
@@ -402,6 +433,21 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                             updated_files.append(fname)
                     except Exception as exc:
                         errors.append(f"{fname}: {exc}")
+
+                # Yeni bağımlılıklar varsa (ytmusicapi vb.) pip ile otomatik kur
+                req_file = os.path.join(BASE_DIR, "requirements.txt")
+                if os.path.exists(req_file):
+                    try:
+                        record_log("📦 Bağımlılıklar güncelleniyor (pip install)...")
+                        subprocess.run(
+                            [sys.executable, "-m", "pip", "install", "--no-cache-dir", "-r", req_file],
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL,
+                            timeout=60,
+                        )
+                        record_log("✅ Bağımlılıklar güncellendi.")
+                    except Exception as pip_err:
+                        record_log(f"⚠️ Pip kurulum uyarısı: {pip_err}")
 
                 # Bellekteki motorları anında yeniden yükle
                 try:

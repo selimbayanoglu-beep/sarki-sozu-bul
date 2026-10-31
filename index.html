@@ -59,10 +59,10 @@
       <!-- Canlı Dalga ve Katman İlerleme Göstergesi -->
       <div id="listenStatusPanel" class="listen-status-panel">
         <div class="wave-steps">
-          <span id="stepLayer1" class="step-pill">1. Bar Bas Filtresi</span>
-          <span id="stepLayer2" class="step-pill">2. Çoklu Ses İzi</span>
-          <span id="stepLayer3" class="step-pill">3. DJ Pitch ±%3.5</span>
-          <span id="stepLayer4" class="step-pill">4. AI Vokal Dinleme</span>
+          <span id="stepLayer1" class="step-pill">1. Ses Güçlendirme &amp; Filtre</span>
+          <span id="stepLayer2" class="step-pill">2. Shazam Ses İzi</span>
+          <span id="stepLayer3" class="step-pill">3. YouTube Music Motoru</span>
+          <span id="stepLayer4" class="step-pill">4. AI Vokal Söz Eşleme</span>
         </div>
         <p id="statusMessage" class="status-message">
           Barda çalan Türkçe veya yabancı parçaya telefonu tutun ve tek tuşa basın.
@@ -73,7 +73,14 @@
         </div>
       </div>
 
-      <!-- Hızlı Söz / İsim Arama Çubuğu (İsteğe Bağlı) -->
+      <!-- Donanım Seviyesinde Ses Kaydı Alternatifi -->
+      <div class="native-record-box">
+        <button id="btnNativeRecord" class="btn-native-record" type="button">
+          🎙️ Telefonun Kendi Kaydedicisiyle Dinle (100% Garantili)
+        </button>
+      </div>
+
+      <!-- Hızlı Söz / İsim Arama Çubuğu (YouTube Music & Genius Destekli) -->
       <form id="searchForm" class="quick-search-bar">
         <input
           id="searchInput"

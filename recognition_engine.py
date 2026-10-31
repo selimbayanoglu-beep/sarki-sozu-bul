@@ -120,9 +120,9 @@ def prepare_dsp_variants(raw_audio_path: str, work_dir: str, wave: int = 1) -> D
     if not FFMPEG_BIN:
         return variants
 
-    # 1. Ses Dengeleme & Temizleme (Subwoofer gürültüsünü keser, ses seviyesini dengeler, müzik frekanslarını korur)
+    # 1. Ses Dengeleme & Güçlendirme (Telefon mikrofonunun uzaktan aldığı sesi 2.8x yükseltir, tepe noktalarını netleştirir)
     norm_path = os.path.join(work_dir, "normalized.wav")
-    norm_filter = "highpass=f=80,dynaudnorm=f=120:g=15"
+    norm_filter = "highpass=f=75,volume=2.8,dynaudnorm=f=100:g=25:m=30"
     if _run_ffmpeg(raw_audio_path, norm_path, norm_filter, sample_rate=44100):
         variants["normalized"] = norm_path
 
@@ -250,8 +250,8 @@ async def run_layer2_fingerprinting(variants: Dict[str, str]) -> Optional[Dict[s
     if not HAS_SHAZAMIO:
         return None
 
-    # Öncelik sırası: Ham ses ve normalizasyon eşzamanlı -> Pitch Down -> Pitch Up
-    ordered_keys = [k for k in ("raw", "normalized", "pitch_down", "pitch_up") if k in variants]
+    # Öncelik sırası: Güçlendirilmiş normalizasyon -> Ham ses -> Pitch Down -> Pitch Up
+    ordered_keys = [k for k in ("normalized", "raw", "pitch_down", "pitch_up") if k in variants]
     if not ordered_keys:
         return None
 

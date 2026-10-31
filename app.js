@@ -68,11 +68,14 @@
   const btnCloseHistory = document.getElementById("btnCloseHistory");
   const btnClearHistory = document.getElementById("btnClearHistory");
   const historyList = document.getElementById("historyList");
+  const btnNativeRecord = document.getElementById("btnNativeRecord");
 
   // Durum Değişkenleri
   let isListening = false;
   let audioCtx = null;
   let mediaStream = null;
+  let mediaRecorder = null;
+  let recordedMediaChunks = [];
   let sourceNode = null;
   let processorNode = null;
   let analyserNode = null;
@@ -259,21 +262,38 @@
 
     setLayerPills(waveNum);
     const waveDescriptions = {
-      1: "Dalga 1/5: Bar bas filtresi + Ses izi ve vokal taranıyor...",
-      2: "Dalga 2/5: DJ Hız/Pitch (±%3.5) düzeltmesi + AI Vokal dinleme devrede...",
-      3: "Dalga 3/5: Derin vokal ayıklama ve çok dilli söz eşleştirme...",
-      4: "Dalga 4/5: Genişletilmiş müzik penceresi analiz ediliyor...",
-      5: "Dalga 5/5: Son kapsamlı tarama yapılıyor...",
+      1: "Dalga 1/5: Ses güçlendirme & Shazam parmak izi taranıyor...",
+      2: "Dalga 2/5: YouTube Music & Shazam paralel taranıyor...",
+      3: "Dalga 3/5: AI Vokal söz yakalama & YouTube Music söz eşleştirme...",
+      4: "Dalga 4/5: DJ Hız/Pitch varyasyonları analiz ediliyor...",
+      5: "Dalga 5/5: Kapsamlı katalog taraması yapılıyor...",
     };
     statusMessage.textContent = waveDescriptions[waveNum] || `Dalga ${waveNum} taranıyor...`;
     orbSubText.textContent = `Dalga ${waveNum} analiz ediliyor...`;
 
-    const samples = getRecentSamples(durationSec);
-    if (samples.length < sampleRate * 1.2) {
-      return;
+    let uploadBlob = null;
+    let uploadExt = ".wav";
+    let uploadMime = "audio/wav";
+
+    // MediaRecorder veri topladıysa onu kullan (telefonun donanım ses kodlayıcısı)
+    if (recordedMediaChunks.length > 0) {
+      const mime = (mediaRecorder && mediaRecorder.mimeType) || "audio/webm";
+      uploadBlob = new Blob(recordedMediaChunks, { type: mime });
+      uploadMime = mime;
+      uploadExt = mime.includes("mp4") ? ".mp4" : ".webm";
     }
 
-    const wavBlob = encodeWAV(samples, sampleRate);
+    // MediaRecorder boşsa veya desteklenmiyorsa PCM WAV yedeği gönder
+    if (!uploadBlob || uploadBlob.size < 1000) {
+      const samples = getRecentSamples(durationSec);
+      if (samples.length < sampleRate * 1.0) {
+        return;
+      }
+      uploadBlob = encodeWAV(samples, sampleRate);
+      uploadExt = ".wav";
+      uploadMime = "audio/wav";
+    }
+
     const waveCapturedAt = performance.now();
     const controller = new AbortController();
     currentAbortControllers.push(controller);
@@ -282,12 +302,12 @@
       const resp = await fetch("/api/recognize", {
         method: "POST",
         headers: {
-          "Content-Type": "audio/wav",
+          "Content-Type": uploadMime,
           "X-Wave": String(waveNum),
-          "X-File-Ext": ".wav",
+          "X-File-Ext": uploadExt,
           "X-Lang": "auto",
         },
-        body: wavBlob,
+        body: uploadBlob,
         signal: controller.signal,
       });
 
@@ -349,35 +369,60 @@
     }
 
     try {
-      // Bar ortamında uzaktaki müziği net yakalayabilmek için autoGainControl AÇIK,
-      // ancak müziği gürültü sanıp boğmaması için echoCancellation & noiseSuppression KAPALI tutulur.
       mediaStream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: true,
           channelCount: 1,
+          autoGainControl: true,
         },
       });
-    } catch (err) {
-      console.warn("Mikrofon açılamadı:", err);
-      httpsBanner.classList.remove("hidden");
-      statusMessage.textContent =
-        "Mikrofon izni alınamadı. HTTPS bağlantısını kullanın veya 'Doğrudan Ses Kaydet' butonuna basın.";
-      return;
+    } catch (_) {
+      try {
+        mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      } catch (err) {
+        console.warn("Mikrofon açılamadı:", err);
+        httpsBanner.classList.remove("hidden");
+        statusMessage.textContent =
+          "Mikrofon izni alınamadı. HTTPS bağlantısını kullanın veya 'Telefonun Kendi Kaydedicisiyle Dinle' butonuna basın.";
+        return;
+      }
     }
 
     isListening = true;
     pcmChunks = [];
+    recordedMediaChunks = [];
     currentAbortControllers = [];
     detectedWordsBox.classList.add("hidden");
     detectedWordsText.textContent = "";
+
+    // Donanım seviyesinde MediaRecorder (iOS ve Android için kayıpsız ses yakalama)
+    mediaRecorder = null;
+    if (typeof MediaRecorder !== "undefined") {
+      let mime = "";
+      if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) {
+        mime = "audio/webm;codecs=opus";
+      } else if (MediaRecorder.isTypeSupported("audio/mp4")) {
+        mime = "audio/mp4";
+      } else if (MediaRecorder.isTypeSupported("audio/webm")) {
+        mime = "audio/webm";
+      }
+      try {
+        mediaRecorder = new MediaRecorder(mediaStream, mime ? { mimeType: mime } : undefined);
+        mediaRecorder.ondataavailable = (e) => {
+          if (e.data && e.data.size > 0) {
+            recordedMediaChunks.push(e.data);
+          }
+        };
+        mediaRecorder.start(400);
+      } catch (e) {
+        console.warn("MediaRecorder başlatılamadı:", e);
+      }
+    }
 
     btnListen.classList.add("listening");
     orbIcon.textContent = "📡";
     orbMainText.textContent = "DİNLENİYOR...";
     orbSubText.textContent = "Durdurmak için dokunun";
-    statusMessage.textContent = "Müziğin frekansı ve vokalleri toplanıyor...";
+    statusMessage.textContent = "Müzik taranıyor (Shazam & YouTube Music)...";
     setLayerPills(1);
 
     const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -398,7 +443,6 @@
       if (!isListening) return;
       const input = e.inputBuffer.getChannelData(0);
       pcmChunks.push(new Float32Array(input));
-      // Bellek taşmasını önlemek için son 25 saniyeyi tut
       const maxChunks = Math.ceil((25 * sampleRate) / 4096);
       if (pcmChunks.length > maxChunks) {
         pcmChunks.shift();
@@ -411,7 +455,7 @@
 
     drawVisualizer();
 
-    // Kayan Pencere Dalga Zamanlayıcıları (Shazam'ın yüksek güvenilirlikle eşleşmesi için en az 3.8s kesit)
+    // Kayan Pencere Dalga Zamanlayıcıları
     waveTimers = [
       setTimeout(() => sendAudioWave(1, 3.8), 3400),
       setTimeout(() => sendAudioWave(2, 5.5), 6200),
@@ -423,6 +467,14 @@
 
   function stopListening(found = false) {
     isListening = false;
+
+    if (mediaRecorder && mediaRecorder.state !== "inactive") {
+      try {
+        mediaRecorder.stop();
+      } catch (_) {}
+    }
+    mediaRecorder = null;
+    recordedMediaChunks = [];
 
     waveTimers.forEach((t) => clearTimeout(t));
     waveTimers = [];
@@ -828,7 +880,13 @@
     }
   });
 
-  // Yedek Native Mikrofon Kaydedici (HTTP bağlantılarda bile çalışır)
+  // Yedek Native Mikrofon Kaydedici (Donanım Seviyesinde Ses Kaydı)
+  if (btnNativeRecord) {
+    btnNativeRecord.addEventListener("click", () => {
+      nativeAudioInput.click();
+    });
+  }
+
   btnNativeMicFallback.addEventListener("click", () => {
     nativeAudioInput.click();
   });
