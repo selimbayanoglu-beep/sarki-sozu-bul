@@ -6,22 +6,19 @@ services:
     restart: unless-stopped
     ports:
       - "8891:8891"
+      - "8892:8892"
     command:
       - sh
       - -c
       - |
-        apt-get update && apt-get install -y ffmpeg git curl &&
-        ARCH=$$(dpkg --print-architecture) &&
-        curl -fsSL "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-$${ARCH}" -o /usr/local/bin/cloudflared &&
-        chmod +x /usr/local/bin/cloudflared || true &&
+        which ffmpeg >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends ffmpeg git curl ca-certificates openssl) &&
         mkdir -p /app && cd /app &&
-        if [ -d .git ]; then
-          git fetch origin && git reset --hard origin/main;
-        else
-          git clone https://github.com/selimbayanoglu-beep/sarki-sozu-bul.git .;
-        fi &&
-        pip install --no-cache-dir -r requirements.txt &&
-        python3 server.py --port 8891 --no-browser
+        rm -rf /tmp/sarki-repo &&
+        git clone --depth 1 https://github.com/selimbayanoglu-beep/sarki-sozu-bul.git /tmp/sarki-repo &&
+        cp -f /tmp/sarki-repo/*.py /tmp/sarki-repo/*.html /tmp/sarki-repo/*.css /tmp/sarki-repo/*.js /tmp/sarki-repo/*.json /tmp/sarki-repo/*.svg /tmp/sarki-repo/*.txt /tmp/sarki-repo/*.sh /app/ 2>/dev/null || true &&
+        rm -rf /tmp/sarki-repo &&
+        pip install -r /app/requirements.txt &&
+        python3 /app/server.py --port 8891 --https-port 8892 --no-browser
 x-casaos:
   main: sarki-sozu-bul
   title:

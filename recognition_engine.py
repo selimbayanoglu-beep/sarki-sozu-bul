@@ -74,13 +74,15 @@ try:
 except Exception:
     HAS_SPEECH_REC = False
 
-try:
-    import static_ffmpeg
-    static_ffmpeg.add_paths()
-except Exception:
-    pass
-
 FFMPEG_BIN = shutil.which("ffmpeg")
+if not FFMPEG_BIN:
+    try:
+        import static_ffmpeg
+        static_ffmpeg.add_paths(weak=True)
+        FFMPEG_BIN = shutil.which("ffmpeg")
+    except Exception:
+        pass
+
 _EXECUTOR = ThreadPoolExecutor(max_workers=8)
 
 

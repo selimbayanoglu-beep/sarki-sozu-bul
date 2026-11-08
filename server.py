@@ -49,13 +49,13 @@ _TUNNEL_PROC: Optional[subprocess.Popen] = None
 
 
 def _is_tunnel_alive(url: str) -> bool:
-    """Cloudflare tünelinin gerçekten aktif olup olmadığını (404/530 vermediğini) doğrular."""
+    """Cloudflare tünelinin gerçekten aktif olup olmadığını doğrular."""
     if not url or not url.startswith("https://"):
         return False
     try:
         ctx = ssl._create_unverified_context()
         req = urllib.request.Request(
-            f"{url.rstrip('/')}/api/status",
+            f"{url.rstrip('/')}/icon.svg",
             headers={"User-Agent": "SarkiSozuBul-HealthCheck/1.0"},
         )
         with urllib.request.urlopen(req, timeout=3.5, context=ctx) as resp:
@@ -65,30 +65,8 @@ def _is_tunnel_alive(url: str) -> bool:
 
 
 def get_tunnel_url() -> str:
-    global _TUNNEL_URL, _TUNNEL_LAST_VERIFIED
-    now = time.time()
-    if _TUNNEL_URL and (now - _TUNNEL_LAST_VERIFIED < 45.0):
-        return _TUNNEL_URL
-
-    candidate = _TUNNEL_URL
-    if not candidate and os.path.exists(TUNNEL_URL_FILE):
-        try:
-            with open(TUNNEL_URL_FILE, "r", encoding="utf-8") as f:
-                candidate = f.read().strip()
-        except Exception:
-            candidate = ""
-
-    if not candidate:
-        candidate = os.environ.get("PUBLIC_HTTPS_URL", "").strip()
-
-    if candidate and _is_tunnel_alive(candidate):
-        _TUNNEL_URL = candidate
-        _TUNNEL_LAST_VERIFIED = now
-        return _TUNNEL_URL
-
-    # Tünel ölmüşse sıfırla ki istemci bozuk 404 adresine yönlendirilmesin
-    _TUNNEL_URL = ""
-    return ""
+    """Hiçbir ağ isteği yapmadan (0ms bloklamasız) mevcut aktif tünel adresini döndürür."""
+    return _TUNNEL_URL or os.environ.get("PUBLIC_HTTPS_URL", "").strip()
 
 
 def _ensure_cloudflared_binary() -> Optional[str]:
@@ -118,32 +96,23 @@ def _ensure_cloudflared_binary() -> Optional[str]:
 
 def start_cloudflared_watchdog(local_port: int) -> None:
     """
-    Cloudflare HTTPS tünelini başlatır ve tünel düşerse/404 verirse otomatik olarak yeniler.
+    Cloudflare HTTPS tünelini arka planda başlatır; süreç kapanırsa otomatik yeniden başlatır.
+    Ana HTTP sunucusunu hiçbir zaman bloklamaz.
     """
     def _watchdog_loop():
         global _TUNNEL_URL, _TUNNEL_LAST_VERIFIED, _TUNNEL_PROC
+        time.sleep(2.0)
         cf_bin = _ensure_cloudflared_binary()
         if not cf_bin:
             return
 
-        # Başlangıçta mevcut tunnel_url.txt canlı mı kontrol et
-        time.sleep(1.5)
-        if get_tunnel_url():
-            pass
-
         while True:
             try:
-                if _TUNNEL_URL and _is_tunnel_alive(_TUNNEL_URL):
-                    _TUNNEL_LAST_VERIFIED = time.time()
-                    time.sleep(45)
-                    continue
-
-                # Eski çalışmayan cloudflared süreçlerini temizle
                 with _TUNNEL_LOCK:
                     if _TUNNEL_PROC is not None:
                         try:
                             _TUNNEL_PROC.terminate()
-                            _TUNNEL_PROC.wait(timeout=3)
+                            _TUNNEL_PROC.wait(timeout=2)
                         except Exception:
                             try:
                                 _TUNNEL_PROC.kill()
@@ -151,12 +120,12 @@ def start_cloudflared_watchdog(local_port: int) -> None:
                                 pass
                         _TUNNEL_PROC = None
 
+                    _TUNNEL_URL = ""
                     try:
                         if os.path.exists(TUNNEL_URL_FILE):
                             os.remove(TUNNEL_URL_FILE)
                     except Exception:
                         pass
-                    _TUNNEL_URL = ""
 
                     proc = subprocess.Popen(
                         [cf_bin, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{local_port}"],
@@ -172,8 +141,6 @@ def start_cloudflared_watchdog(local_port: int) -> None:
                         match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
                         if match:
                             found_url = match.group(0)
-                            # Yeni tünelin DNS/Edge kaydının oturması için kısa bekleme
-                            time.sleep(2.0)
                             _TUNNEL_URL = found_url
                             _TUNNEL_LAST_VERIFIED = time.time()
                             try:
@@ -184,9 +151,10 @@ def start_cloudflared_watchdog(local_port: int) -> None:
                             print("=" * 64)
                             print(f"🌍 CANLI GÜVENLİ MOBİL HTTPS ADRESİ: {found_url}")
                             print("=" * 64)
+                proc.wait()
             except Exception as exc:
                 sys.stderr.write(f"⚠️ Cloudflare Tunnel döngü hatası: {exc}\n")
-            time.sleep(10)
+            time.sleep(5)
 
     t = threading.Thread(target=_watchdog_loop, daemon=True)
     t.start()
