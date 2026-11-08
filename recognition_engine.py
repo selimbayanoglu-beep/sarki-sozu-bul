@@ -1,45 +1,36 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Şarkı Sözü Bul — 4 Katmanlı Akıllı Müzik Tanıma Motoru (recognition_engine.py)
+Şarkı Sözü Bul — 4 Katmanlı Akıllı Müzik & Vokal Tanıma Motoru (recognition_engine.py)
 
-Barda çalan herhangi bir dildeki (Türkçe, İngilizce, İspanyolca, Fransızca vb.) şarkıyı
-sadece müziğini dinleyerek bulmak için 4 katmanı sırayla ve paralel çalıştırır:
+Katman 1 (Spektral Korumalı DSP Ses Hazırlama):
+  - Ham sesi Shazam spektrogram tepe noktalarını bozmadan standart 44.1kHz mono PCM WAV'a dönüştürür.
+  - Gürültülü ortamlar için yumuşak bant geçiren (70Hz-10kHz) müzik kopyası ve son 5.5sn kesiti üretir.
+  - Konuşma/vokal yakalama (STT) için doğal 16kHz ve vokal-odaklı 16kHz ses kopyaları hazırlar.
 
-Katman 1 (DSP Bar Filtresi):
-  - Bar uğultusunu ve aşırı subwoofer basını (20Hz-130Hz) keser, sesi dengeler.
-  - DJ'lerin şarkıyı %3-%4 hızlandırarak/yavaşlatarak çalmasına karşı pitch/tempo düzeltilmiş
-    ses kopyaları üretir.
-  - Enstrümanları bastırıp şarkıcının ses frekanslarını (220Hz-3600Hz) öne çıkaran vokal kopyası üretir.
+Katman 2 (Shazam V5 Akustik Ses İzi Motoru):
+  - Resmi Shazam v5 discovery protokolü ve çoklu ülke rotasyonu ile hız sınırına takılmadan
+    şarkıyı ve tam o anki çalma saniyesini (offset_seconds) tespit eder.
 
-Katman 2 (Çoklu Ses İzi - Multi-Variant Audio Fingerprinting):
-  - Ham ses, Bar-Temizlenmiş ses ve DJ-Pitch düzeltilmiş sesleri paralel olarak ShazamIO
-    (ve varsa AudD) motorlarında tarar.
-  - Şarkının o an kaçıncı saniyesinde olduğunu (offset) yakalar.
+Katman 3 (Çift Kanallı AI Vokal & Tarayıcı Canlı Söz Yakalama):
+  - Canlı müzik, akustik cover veya mırıldanma/söyleme durumunda hem tarayıcıdan gelen
+    canlı metni hem de sunucu STT motorunu kullanarak söylenen sözlerden veya şarkı adından parçayı bulur.
 
-Katman 3 (AI Vokal -> Söz Çıkarma - Canlı Müzik & Cover Kurtarıcısı):
-  - Canlı grup, akustik performans veya ağır remix nedeniyle ses izi eşleşmezse,
-    vokal filtresinden geçmiş müziğin içinden şarkıcının söylediği kelimeleri
-    çok dilli ses tanıma (TR, EN, ES, FR, DE, IT) ile ayıklar.
-
-Katman 4 (Söz ve Senkronize Karaoke Eşleştirme):
-  - Bulunan şarkının veya müziğin içinden yakalanan kelimelerin tam şarkı sözlerini,
-    varsa saniye saniye akan LRC karaoke satırlarını ve o an söylenen satırı döndürür.
+Katman 4 (Çok Kaynaklı Senkronize Karaoke Söz Eşleştirme):
+  - Bulunan şarkının milisaniye senkronlu (LRC / YouTube Music) veya tam metin sözlerini getirir.
 """
 
 import asyncio
-import json
+from concurrent.futures import ThreadPoolExecutor
 import os
+from random import choice
 import shutil
+import ssl
 import subprocess
+import sys
 import tempfile
 import time
-import urllib.parse
-import urllib.request
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
-import sys
-import ssl
 import uuid
 
 _CA_PATH = None
@@ -63,33 +54,25 @@ if "SSL_CERT_FILE" not in os.environ:
 import lyrics_engine
 
 try:
-    from ytmusicapi import YTMusic
-except ImportError:
-    try:
-        import subprocess
-        subprocess.run(
-            [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--break-system-packages", "ytmusicapi"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            timeout=60,
-        )
-        from ytmusicapi import YTMusic
-    except Exception:
-        pass
-
-# İsteğe bağlı kütüphaneler (Docker sunucusunda tam kurulu olur)
-try:
     from shazamio import Shazam
+    from shazamio_core import Recognizer
     HAS_SHAZAMIO = True
 except Exception:
     HAS_SHAZAMIO = False
+
+try:
+    from shazamio.user_agent import USER_AGENTS
+except Exception:
+    USER_AGENTS = [
+        "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+        "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Mobile/15E148 Safari/604.1",
+    ]
 
 try:
     import speech_recognition as sr
     HAS_SPEECH_REC = True
 except Exception:
     HAS_SPEECH_REC = False
-
 
 try:
     import static_ffmpeg
@@ -98,7 +81,7 @@ except Exception:
     pass
 
 FFMPEG_BIN = shutil.which("ffmpeg")
-_EXECUTOR = ThreadPoolExecutor(max_workers=6)
+_EXECUTOR = ThreadPoolExecutor(max_workers=8)
 
 
 def _run_ffmpeg(
@@ -108,7 +91,7 @@ def _run_ffmpeg(
     sample_rate: int = 44100,
     tail_seconds: Optional[float] = None,
 ) -> bool:
-    """ffmpeg ile ses dosyasını dönüştürür ve belirtilen DSP ses filtresini uygular."""
+    """ffmpeg ile ses dosyasını dönüştürür ve belirtilen ses filtresini uygular."""
     if not FFMPEG_BIN:
         return False
     cmd = [
@@ -128,110 +111,130 @@ def _run_ffmpeg(
         "1",
         "-ar",
         str(sample_rate),
+        "-acodec",
+        "pcm_s16le",
     ])
     if audio_filter:
         cmd.extend(["-af", audio_filter])
     cmd.append(output_path)
     try:
         subprocess.run(cmd, check=True, timeout=8.0, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        return os.path.exists(output_path) and os.path.getsize(output_path) > 512
+        if os.path.exists(output_path) and os.path.getsize(output_path) > 1024:
+            return True
     except Exception:
-        return False
+        pass
+
+    # Eğer kapsayıcıda süre bilgisi yoksa (-sseof başarısız olduysa), -sseof olmadan tekrar dene
+    if tail_seconds:
+        cmd_fallback = [
+            FFMPEG_BIN,
+            "-y",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-i",
+            input_path,
+            "-t",
+            str(tail_seconds),
+            "-vn",
+            "-ac",
+            "1",
+            "-ar",
+            str(sample_rate),
+            "-acodec",
+            "pcm_s16le",
+        ]
+        if audio_filter:
+            cmd_fallback.extend(["-af", audio_filter])
+        cmd_fallback.append(output_path)
+        try:
+            subprocess.run(cmd_fallback, check=True, timeout=8.0, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            return os.path.exists(output_path) and os.path.getsize(output_path) > 1024
+        except Exception:
+            return False
+    return False
 
 
 def prepare_dsp_variants(raw_audio_path: str, work_dir: str, wave: int = 1) -> Dict[str, str]:
     """
-    Katman 1: Bar/oda ortamındaki kayıttan farklı DSP filtreli ses varyasyonları üretir.
-    Clipping (sinyal kırpılması) yaratmadan dinamik ses normalizasyonu uygular ve
-    Shazam'ın 15sn üzeri boş dönme hatasını önlemek için en net son 11 saniyeyi alır.
+    Katman 1: Kayıttan hem spektrogram-korumalı akustik parmak izi kopyaları
+    hem de vokal konuşma tanıma (STT) kopyaları üretir.
     """
     variants: Dict[str, str] = {"raw": raw_audio_path}
     if not FFMPEG_BIN:
         return variants
 
-    # 0. Ham sesi 44.1kHz mono standart PCM WAV'a çevir (son 11 sn)
+    # 1. Doğrusal (Spektrogram Korumalı) 44.1kHz PCM WAV (Son 11.5 sn)
+    # Shazam'ın frekans tepe noktalarını (constellation map) bozmamak için agresif dynaudnorm uygulanmaz.
     raw_wav_path = os.path.join(work_dir, "raw_pcm.wav")
     if _run_ffmpeg(raw_audio_path, raw_wav_path, audio_filter=None, sample_rate=44100, tail_seconds=11.5):
         variants["raw"] = raw_wav_path
 
-    # 1. Kırpılmasız Dinamik Ses Dengeleme & Oda Gürültü Kesme (p=0.92 tepe sınırı ile distorsiyonsuz 20x kazanç)
-    norm_path = os.path.join(work_dir, "normalized.wav")
-    norm_filter = "highpass=f=80,lowpass=f=8500,dynaudnorm=f=150:g=15:p=0.92:m=20"
-    if _run_ffmpeg(raw_audio_path, norm_path, norm_filter, sample_rate=44100, tail_seconds=11.5):
-        variants["normalized"] = norm_path
+    # 2. Yumuşak Bar/Ortam Dengeli Müzik Kopyası (Geniş 400ms pencereli, distorsiyonsuz)
+    clean_music_path = os.path.join(work_dir, "clean_music.wav")
+    clean_filter = "highpass=f=70,lowpass=f=10000,dynaudnorm=f=400:g=31:p=0.92:m=6"
+    if _run_ffmpeg(raw_audio_path, clean_music_path, clean_filter, sample_rate=44100, tail_seconds=11.5):
+        variants["clean_music"] = clean_music_path
 
-    # 2. Son 5 Saniye Odaklı Kesit (Kullanıcı telefonu sonradan müziğe yaklaştırdıysa ilk saniyedeki sessizliği atar)
+    # 3. Son 5.5 Saniye Odaklı Kesit (İlk saniyelerdeki sessizliği veya konuşmayı atar)
     tail_path = os.path.join(work_dir, "tail_focus.wav")
-    tail_filter = "highpass=f=90,lowpass=f=8000,dynaudnorm=f=120:g=15:p=0.92:m=25"
-    if _run_ffmpeg(raw_audio_path, tail_path, tail_filter, sample_rate=44100, tail_seconds=5.2):
+    if _run_ffmpeg(raw_audio_path, tail_path, clean_filter, sample_rate=44100, tail_seconds=5.5):
         variants["tail_focus"] = tail_path
 
-    # 3. Vokal Öne Çıkarma (Şarkıcının sözlerini Speech-to-Text motoruna iletmek için 16kHz WAV)
+    # 4. STT Kanal 1: Doğal 16kHz Ses (Net söylenen sözler ve şarkı adları için)
+    stt_clean_path = os.path.join(work_dir, "stt_clean.wav")
+    stt_clean_filter = "highpass=f=90,lowpass=f=7500,dynaudnorm=f=300:g=21:p=0.92:m=8"
+    if _run_ffmpeg(raw_audio_path, stt_clean_path, stt_clean_filter, sample_rate=16000, tail_seconds=10.5):
+        variants["stt_clean"] = stt_clean_path
+
+    # 5. STT Kanal 2: Vokal Frekansları Güçlendirilmiş 16kHz Ses (Enstrüman üstü vokal için)
     vocal_path = os.path.join(work_dir, "vocal_boost.wav")
     vocal_filter = (
-        "highpass=f=180,lowpass=f=4200,"
-        "equalizer=f=1200:t=q:w=1.2:g=6,"
-        "equalizer=f=2600:t=q:w=1.2:g=5,"
-        "dynaudnorm=f=120:g=15:p=0.92:m=15"
+        "highpass=f=170,lowpass=f=4500,"
+        "equalizer=f=1400:t=q:w=1.0:g=4,"
+        "equalizer=f=2600:t=q:w=1.0:g=3,"
+        "dynaudnorm=f=250:g=15:p=0.92:m=10"
     )
-    if _run_ffmpeg(raw_audio_path, vocal_path, vocal_filter, sample_rate=16000, tail_seconds=10.0):
+    if _run_ffmpeg(raw_audio_path, vocal_path, vocal_filter, sample_rate=16000, tail_seconds=10.5):
         variants["vocal_boost"] = vocal_path
 
-    # 4. Dalga 2 ve sonrasında DJ Tempo / Pitch kaymalarına karşı (-3.5% ve +3.5%) varyasyonlar
+    # 6. Dalga 2 ve sonrasında DJ Tempo / Pitch kaymalarına karşı (-3% ve +3%) varyasyonlar
     if wave >= 2:
         pitch_down_path = os.path.join(work_dir, "pitch_down.wav")
-        pitch_down_filter = "asetrate=44100*0.965,aresample=44100,highpass=f=80,dynaudnorm=f=150:g=15:p=0.92"
-        if _run_ffmpeg(raw_audio_path, pitch_down_path, pitch_down_filter, sample_rate=44100, tail_seconds=10.0):
+        pitch_down_filter = "asetrate=44100*0.97,aresample=44100,highpass=f=75"
+        if _run_ffmpeg(raw_audio_path, pitch_down_path, pitch_down_filter, sample_rate=44100, tail_seconds=9.5):
             variants["pitch_down"] = pitch_down_path
 
         pitch_up_path = os.path.join(work_dir, "pitch_up.wav")
-        pitch_up_filter = "asetrate=44100*1.035,aresample=44100,highpass=f=80,dynaudnorm=f=150:g=15:p=0.92"
-        if _run_ffmpeg(raw_audio_path, pitch_up_path, pitch_up_filter, sample_rate=44100, tail_seconds=10.0):
+        pitch_up_filter = "asetrate=44100*1.03,aresample=44100,highpass=f=75"
+        if _run_ffmpeg(raw_audio_path, pitch_up_path, pitch_up_filter, sample_rate=44100, tail_seconds=9.5):
             variants["pitch_up"] = pitch_up_path
 
     return variants
 
 
-# Shazam çoklu ülke/cihaz havuzu (HTTP 429 hız sınırına takılmayı %100 engeller)
 _SHAZAM_LOCALES = [
-    ("tr-TR", "TR", "iphone"),
-    ("en-US", "US", "android"),
-    ("en-GB", "GB", "iphone"),
-    ("de-DE", "DE", "android"),
-    ("fr-FR", "FR", "iphone"),
-    ("es-ES", "ES", "android"),
-    ("it-IT", "IT", "iphone"),
-    ("nl-NL", "NL", "android"),
-    ("sv-SE", "SE", "iphone"),
-    ("en-CA", "CA", "android"),
-    ("en-AU", "AU", "iphone"),
-    ("pt-BR", "BR", "android"),
-    ("pl-PL", "PL", "iphone"),
-    ("de-AT", "AT", "android"),
-    ("fr-CH", "CH", "iphone"),
-    ("nl-BE", "BE", "android"),
+    ("tr-TR", "TR"),
+    ("en-US", "US"),
+    ("en-GB", "GB"),
+    ("de-DE", "DE"),
+    ("fr-FR", "FR"),
+    ("es-ES", "ES"),
+    ("it-IT", "IT"),
+    ("nl-NL", "NL"),
 ]
 _SHAZAM_LOCALE_IDX = 0
-_CORE_RECOGNIZER = None
 
 
-def _get_core_recognizer():
-    global _CORE_RECOGNIZER
-    if _CORE_RECOGNIZER is None:
-        from shazamio_core import Recognizer
-        _CORE_RECOGNIZER = Recognizer(segment_duration_seconds=12)
-    return _CORE_RECOGNIZER
-
-
-def create_shazam_client() -> Shazam:
+def create_shazam_client() -> Any:
     """Geriye dönük uyumluluk için Shazam istemcisi döndürür."""
     return Shazam(language="tr-TR", endpoint_country="TR")
 
 
 async def _shazam_recognize_single(file_path: str, variant_label: str) -> Optional[Dict[str, Any]]:
     """
-    Tek bir ses varyasyonunu Shazam'ın Rust çekirdeğiyle parmak izine çevirir ve
-    çoklu ülke/cihaz uç noktası rotasyonu ile 429 engeline takılmadan 0.4 saniyede sorgular.
+    Tek bir ses dosyasını Shazam'ın Rust çekirdeğiyle (shazamio_core) parmak izine çevirir
+    ve tam Shazam v5 discovery uç noktası ile sorgular.
     """
     global _SHAZAM_LOCALE_IDX
     if not HAS_SHAZAMIO or not os.path.exists(file_path):
@@ -240,7 +243,7 @@ async def _shazam_recognize_single(file_path: str, variant_label: str) -> Option
         import aiohttp
         from shazamio.converter import Converter
 
-        rec = _get_core_recognizer()
+        rec = Recognizer(segment_duration_seconds=12)
         sig = await rec.recognize_path(value=file_path, options=None)
         payload = Converter.data_search(
             sig.timezone,
@@ -257,26 +260,26 @@ async def _shazam_recognize_single(file_path: str, variant_label: str) -> Option
             ctx.verify_mode = ssl.CERT_NONE
 
         out = None
-        timeout_cfg = aiohttp.ClientTimeout(total=5.0)
+        timeout_cfg = aiohttp.ClientTimeout(total=5.5)
         async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(ssl=ctx), timeout=timeout_cfg) as session:
-            # En fazla 3 farklı ülke uç noktasını dene (429 gelirse anında diğer ülkeye geçer)
             for attempt in range(3):
                 idx = (_SHAZAM_LOCALE_IDX + attempt) % len(_SHAZAM_LOCALES)
                 _SHAZAM_LOCALE_IDX = (_SHAZAM_LOCALE_IDX + 1) % len(_SHAZAM_LOCALES)
-                lang, country, dev = _SHAZAM_LOCALES[idx]
+                lang, country = _SHAZAM_LOCALES[idx]
                 u1, u2 = str(uuid.uuid4()).upper(), str(uuid.uuid4()).upper()
-                url = f"https://amp.shazam.com/discovery/v5/{lang}/{country}/{dev}/-/tag/{u1}/{u2}?sync=true&webv3=true"
+                url = (
+                    f"https://amp.shazam.com/discovery/v5/{lang}/{country}/iphone/-/tag/{u1}/{u2}"
+                    "?sync=true&webv3=true&sampling=true&connected=&shazamapiversion=v3"
+                    "&sharehub=true&hubv5minorversion=v5.1&hidelb=true&video=v3"
+                )
                 headers = {
-                    "X-Shazam-Platform": "IPHONE" if dev == "iphone" else "ANDROID",
-                    "X-Shazam-AppVersion": "16.2.0",
+                    "X-Shazam-Platform": "IPHONE",
+                    "X-Shazam-AppVersion": "14.1.0",
                     "Accept": "*/*",
                     "Accept-Language": lang,
+                    "Accept-Encoding": "gzip, deflate",
                     "Content-Type": "application/json",
-                    "User-Agent": (
-                        f"Shazam/16.2.0 (iPhone; iOS 17.{idx % 6}; Scale/3.00)"
-                        if dev == "iphone"
-                        else f"Dalvik/2.1.0 (Linux; U; Android 14; Pixel {6 + (idx % 3)} Build/UP1A.231005.007)"
-                    ),
+                    "User-Agent": choice(USER_AGENTS),
                 }
                 try:
                     async with session.post(url, json=payload, headers=headers) as resp:
@@ -284,6 +287,7 @@ async def _shazam_recognize_single(file_path: str, variant_label: str) -> Option
                             out = await resp.json(content_type=None)
                             break
                         elif resp.status == 429:
+                            await asyncio.sleep(0.15)
                             continue
                 except Exception:
                     continue
@@ -292,17 +296,14 @@ async def _shazam_recognize_single(file_path: str, variant_label: str) -> Option
         if not track:
             return None
 
-        title = track.get("title") or ""
-        artist = track.get("subtitle") or ""
+        title = (track.get("title") or "").strip()
+        artist = (track.get("subtitle") or "").strip()
         if not title:
             return None
 
         images = track.get("images") or {}
         cover = images.get("coverarthq") or images.get("coverart") or images.get("background") or ""
 
-        # Şarkının o anki çalma saniyesini (offset) yakala:
-        # Shazam'ın döndürdüğü raw_offset, gönderilen ses kesitinin BAŞLANGIÇ saniyesidir.
-        # Kesitin gerçek uzunluğunu (sig.signature.samples ms) ekleyerek kesitin BİTİŞ (şu anki) saniyesini buluyoruz.
         offset_seconds: Optional[float] = None
         matches = (out or {}).get("matches") or []
         if matches and isinstance(matches[0], dict):
@@ -311,7 +312,6 @@ async def _shazam_recognize_single(file_path: str, variant_label: str) -> Option
                 sample_dur_sec = float(getattr(sig.signature, "samples", 0) or 0) / 1000.0
                 offset_seconds = round(float(raw_offset) + sample_dur_sec, 2)
 
-        # Shazam içinde gömülü söz varsa yedek olarak al
         shazam_lyrics: List[str] = []
         for section in track.get("sections") or []:
             if section.get("type") == "LYRICS" and section.get("text"):
@@ -333,128 +333,184 @@ async def _shazam_recognize_single(file_path: str, variant_label: str) -> Option
 
 async def run_layer2_fingerprinting(variants: Dict[str, str]) -> Optional[Dict[str, Any]]:
     """
-    Katman 2: Tüm DSP ses varyasyonlarını paralel olarak ses izi motorunda tarar.
+    Katman 2: Önce doğrusal ham sesi ve yumuşak dengelenmiş sesi dener;
+    eşleşme çıkmazsa son kesit ve DJ pitch varyasyonlarını tarar.
     """
     if not HAS_SHAZAMIO:
         return None
 
-    # Öncelik sırası: Güçlendirilmiş normalizasyon -> Ham ses -> Son 5sn odaklı -> Pitch Down -> Pitch Up
-    ordered_keys = [k for k in ("normalized", "raw", "tail_focus", "pitch_down", "pitch_up") if k in variants]
-    if not ordered_keys:
-        return None
+    # Aşama 1: En yüksek doğruluklu 'raw' ve 'clean_music' varyasyonları
+    primary_keys = [k for k in ("raw", "clean_music") if k in variants]
+    if primary_keys:
+        tasks = [asyncio.create_task(_shazam_recognize_single(variants[k], k)) for k in primary_keys]
+        for completed in asyncio.as_completed(tasks):
+            try:
+                res = await completed
+                if res and res.get("title"):
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+                    return res
+            except Exception:
+                continue
 
-    tasks = [
-        asyncio.create_task(_shazam_recognize_single(variants[k], k))
-        for k in ordered_keys
-    ]
+    # Aşama 2: Yardımcı varyasyonlar (tail_focus, pitch_down, pitch_up)
+    secondary_keys = [k for k in ("tail_focus", "pitch_down", "pitch_up") if k in variants]
+    if secondary_keys:
+        tasks = [asyncio.create_task(_shazam_recognize_single(variants[k], k)) for k in secondary_keys]
+        for completed in asyncio.as_completed(tasks):
+            try:
+                res = await completed
+                if res and res.get("title"):
+                    for t in tasks:
+                        if not t.done():
+                            t.cancel()
+                    return res
+            except Exception:
+                continue
 
-    for completed in asyncio.as_completed(tasks):
-        try:
-            res = await completed
-            if res and res.get("title"):
-                for t in tasks:
-                    if not t.done():
-                        t.cancel()
-                return res
-        except Exception:
-            continue
     return None
 
 
-def _extract_vocals_text_sync(wav_path: str, languages: List[str]) -> List[Tuple[str, str]]:
+def _extract_vocals_text_sync(wav_paths: List[str], languages: List[str]) -> List[Tuple[str, str]]:
     """
-    Katman 3: Vokal-güçlendirilmiş WAV dosyasından şarkıcının söylediği kelimeleri
-    birden fazla dilde (TR, EN, ES, FR vb.) ayıklar.
+    Katman 3: Hem doğal 16kHz sesten hem de vokal-güçlendirilmiş WAV dosyasından
+    şarkıcının veya kullanıcının söylediği kelimeleri çok dilli olarak ayıklar.
     """
-    if not HAS_SPEECH_REC or not os.path.exists(wav_path):
+    if not HAS_SPEECH_REC:
         return []
 
-    recognizer = sr.Recognizer()
-    recognizer.energy_threshold = 150
-    recognizer.dynamic_energy_threshold = True
-
-    try:
-        with sr.AudioFile(wav_path) as source:
-            audio_data = recognizer.record(source)
-    except Exception:
+    valid_paths = [p for p in wav_paths if p and os.path.exists(p)]
+    if not valid_paths:
         return []
 
-    def _recognize_lang(lang_code: str) -> Optional[Tuple[str, str]]:
+    audio_samples: List[Any] = []
+    for p in valid_paths:
         try:
-            # show_all=True ile en yüksek güvenilirlikli alternatifleri alabiliriz
+            rec = sr.Recognizer()
+            rec.energy_threshold = 120
+            rec.dynamic_energy_threshold = True
+            with sr.AudioFile(p) as source:
+                audio_samples.append(rec.record(source))
+        except Exception:
+            continue
+
+    if not audio_samples:
+        return []
+
+    def _recognize_pair(audio_data: Any, lang_code: str) -> List[Tuple[str, str]]:
+        out_list: List[Tuple[str, str]] = []
+        try:
+            recognizer = sr.Recognizer()
             res = recognizer.recognize_google(audio_data, language=lang_code, show_all=True)
             if isinstance(res, dict) and res.get("alternative"):
-                best = res["alternative"][0]
-                transcript = (best.get("transcript") or "").strip()
-                if len(transcript.split()) >= 2 or len(transcript) >= 7:
-                    return (lang_code, transcript)
-            elif isinstance(res, str) and len(res.strip()) >= 6:
-                return (lang_code, res.strip())
+                for alt in res["alternative"][:2]:
+                    transcript = (alt.get("transcript") or "").strip()
+                    if len(transcript.split()) >= 2 or len(transcript) >= 6:
+                        out_list.append((lang_code, transcript))
+            elif isinstance(res, str) and len(res.strip()) >= 5:
+                out_list.append((lang_code, res.strip()))
         except Exception:
             pass
-        return None
+        return out_list
 
     detected: List[Tuple[str, str]] = []
-    futures = [_EXECUTOR.submit(_recognize_lang, lang) for lang in languages]
+    seen_norm = set()
+    futures = [
+        _EXECUTOR.submit(_recognize_pair, aud, lang)
+        for aud in audio_samples
+        for lang in languages
+    ]
     for fut in futures:
         try:
-            item = fut.result(timeout=5.5)
-            if item:
-                detected.append(item)
+            items = fut.result(timeout=5.5) or []
+            for lang_code, txt in items:
+                norm = lyrics_engine.normalize_text(txt)
+                if norm and norm not in seen_norm:
+                    seen_norm.add(norm)
+                    detected.append((lang_code, txt))
         except Exception:
             continue
     return detected
 
 
-async def run_layer3_vocal_lyrics_extraction(variants: Dict[str, str], preferred_lang: str = "auto") -> Optional[Dict[str, Any]]:
+async def run_layer3_vocal_lyrics_extraction(
+    variants: Dict[str, str],
+    preferred_lang: str = "auto",
+    browser_transcript: str = "",
+) -> Optional[Dict[str, Any]]:
     """
-    Katman 3: Canlı müzik / cover / gürültülü bar durumunda müziğin içindeki şarkıcının
-    söylediği sözleri yapay zeka ile metne çevirip şarkıyı bulur.
+    Katman 3: Canlı müzik / cover / mırıldanma veya söz söyleme durumunda
+    yakalanan kelimelerden şarkıyı ve o anki satırını bulur.
     """
-    target_wav = variants.get("vocal_boost") or variants.get("clean_bar")
-    if not target_wav:
-        return None
+    detected_phrases: List[Tuple[str, str]] = []
+
+    if browser_transcript and len(browser_transcript.strip()) >= 4:
+        detected_phrases.append(("tarayıcı-canlı", browser_transcript.strip()))
+
+    wav_candidates: List[str] = []
+    if variants.get("stt_clean"):
+        wav_candidates.append(variants["stt_clean"])
+    if variants.get("vocal_boost"):
+        wav_candidates.append(variants["vocal_boost"])
+    if not wav_candidates and variants.get("raw"):
+        wav_candidates.append(variants["raw"])
 
     if preferred_lang == "tr":
         langs = ["tr-TR", "en-US"]
     elif preferred_lang == "en":
         langs = ["en-US", "tr-TR"]
     else:
-        # Otomatik çok dilli tarama: Türkçe, İngilizce, İspanyolca, Fransızca
         langs = ["tr-TR", "en-US", "es-ES", "fr-FR"]
 
     loop = asyncio.get_running_loop()
-    detected_phrases = await loop.run_in_executor(
-        _EXECUTOR, _extract_vocals_text_sync, target_wav, langs
-    )
+    if wav_candidates:
+        stt_phrases = await loop.run_in_executor(
+            _EXECUTOR, _extract_vocals_text_sync, wav_candidates, langs
+        )
+        for item in stt_phrases:
+            detected_phrases.append(item)
 
     if not detected_phrases:
         return None
 
-    # Yakalanan her söz kesiti için şarkı sözü veritabanlarında arama yap
     for lang_code, phrase in detected_phrases:
         cleaned_phrase = phrase.strip()
         words = cleaned_phrase.split()
-        # YANLIŞ EŞLEŞMELERİ (FALSE-POSITIVE) KESİNLİKLE ENGELLE:
-        # 1-2 kelimelik fısıltılar veya ortam sesleri rastgele şarkı eşleştirmemelidir.
-        # En az 3 kelime veya 14 karakterlik belirgin bir dize olmalı.
-        if len(words) < 3 and len(cleaned_phrase) < 14:
+        if len(words) < 2 and len(cleaned_phrase) < 8:
             continue
 
         song_match = await loop.run_in_executor(
             _EXECUTOR, lyrics_engine.search_song_by_lyrics_snippet, cleaned_phrase
         )
-        if song_match and song_match.get("lines"):
-            # ÇİFTE DOĞRULAMA: Bulunan şarkının sözleri gerçekten bu söz öbeğini içeriyor mu?
-            # find_matching_line_index -> (satır indeksi, satır zamanı); indeks >= 0 ise söz şarkıda geçiyor
-            matched_idx, _line_time = lyrics_engine.find_matching_line_index(song_match["lines"], cleaned_phrase)
-            if matched_idx is not None and matched_idx >= 0:
-                song_match["layer_used"] = f"Katman 3: AI Vokalden Söz Yakalama ({lang_code})"
-                song_match["detected_vocal_phrase"] = cleaned_phrase
-                song_match["matched_line_index"] = matched_idx
-                return song_match
+        if not song_match or not song_match.get("title"):
+            continue
 
-    # Şarkı tam doğrulanmadıysa sadece ekranda bilgi amaçlı kelimeleri döndür
+        lines = song_match.get("lines") or []
+        matched_idx, line_time = lyrics_engine.find_matching_line_index(lines, cleaned_phrase)
+
+        # Doğrulama 1: Yakalanan söz öbeği şarkının sözlerinde doğrudan geçiyor mu?
+        if matched_idx is not None and matched_idx >= 0:
+            song_match["layer_used"] = f"Katman 3: Vokalden Söz Yakalama ({lang_code})"
+            song_match["detected_vocal_phrase"] = cleaned_phrase
+            song_match["matched_line_index"] = matched_idx
+            if line_time is not None:
+                song_match["offset_seconds"] = line_time
+            return song_match
+
+        # Doğrulama 2: Kullanıcı şarkının adını / sanatçısını söylemiş olabilir mi?
+        title_sim = lyrics_engine.title_artist_similarity(
+            cleaned_phrase,
+            "",
+            f"{song_match.get('artist', '')} {song_match.get('title', '')}",
+            "",
+        )
+        if title_sim >= 0.62 and lines:
+            song_match["layer_used"] = f"Katman 3: Sesli Şarkı Adı Tanıma ({lang_code})"
+            song_match["detected_vocal_phrase"] = cleaned_phrase
+            song_match["matched_line_index"] = 0
+            return song_match
+
     return {
         "partial_vocal_only": True,
         "detected_phrases": detected_phrases,
@@ -463,15 +519,13 @@ async def run_layer3_vocal_lyrics_extraction(variants: Dict[str, str], preferred
 
 async def recognize_music_pipeline(
     audio_bytes: bytes,
-    file_ext: str = ".webm",
+    file_ext: str = ".wav",
     wave: int = 1,
     preferred_lang: str = "auto",
+    browser_transcript: str = "",
 ) -> Dict[str, Any]:
     """
-    Ana 4 Katmanlı Müzik Tanıma Hattı.
-    Telefonun gönderdiği ses paketini alır, DSP filtrelerinden geçirir,
-    önce Çoklu Ses İzi, ardından AI Vokalden Söz Yakalama katmanlarını çalıştırır
-    ve tam şarkı sözleriyle birlikte döndürür.
+    Ana 4 Katmanlı Müzik & Vokal Tanıma Hattı.
     """
     start_time = time.time()
     work_dir = tempfile.mkdtemp(prefix="sarki_bul_")
@@ -483,14 +537,16 @@ async def recognize_music_pipeline(
 
         loop = asyncio.get_running_loop()
 
-        # KATMAN 1: DSP Bar Gürültü Filtresi & Vokal Boost & DJ Pitch Düzeltme
+        # KATMAN 1: Spektrogram Korumalı DSP Varyasyonları + STT Ses Hazırlığı
         variants = await loop.run_in_executor(
             _EXECUTOR, prepare_dsp_variants, raw_path, work_dir, wave
         )
 
-        # KATMAN 2 (Akustik Ses İzi) ve KATMAN 3 (AI Vokal Söz Dinleme) paralel başlar
+        # KATMAN 2 (Shazam Akustik Ses İzi) ve KATMAN 3 (AI Vokal Söz Dinleme) paralel başlar
         fp_task = asyncio.create_task(run_layer2_fingerprinting(variants))
-        vocal_task = asyncio.create_task(run_layer3_vocal_lyrics_extraction(variants, preferred_lang))
+        vocal_task = asyncio.create_task(
+            run_layer3_vocal_lyrics_extraction(variants, preferred_lang, browser_transcript)
+        )
 
         fp_result = await fp_task
         if fp_result and fp_result.get("title"):
@@ -506,7 +562,7 @@ async def recognize_music_pipeline(
                 "",
             )
 
-            # Telefondan gelen canlı vokal sözü varsa (video/canlı performans farklarını düzeltmek için) kontrol et
+            # Telefondan gelen canlı vokal sözü varsa kontrol et
             if vocal_task:
                 try:
                     vocal_res = await asyncio.wait_for(vocal_task, timeout=0.65)
@@ -517,7 +573,7 @@ async def recognize_music_pipeline(
                         for _lc, ph in vocal_res.get("detected_phrases") or []:
                             phrases_to_check.append(ph)
                         for ph in phrases_to_check:
-                            if len(ph.strip()) >= 10:
+                            if len(ph.strip()) >= 8:
                                 shazam_off = full_lyrics.get("offset_seconds")
                                 v_idx, v_time = lyrics_engine.find_matching_line_index(
                                     full_lyrics["lines"], ph, hint_offset=shazam_off
@@ -527,18 +583,18 @@ async def recognize_music_pipeline(
                                     if shazam_off is None:
                                         full_lyrics["matched_line_index"] = v_idx
                                         if v_time is not None:
-                                            full_lyrics["offset_seconds"] = round(v_time + 1.5, 2)
+                                            full_lyrics["offset_seconds"] = round(v_time + 1.2, 2)
                                     break
                 except Exception:
                     if not vocal_task.done():
                         vocal_task.cancel()
 
             variant_map = {
-                "normalized": "Katman 1+2: Akustik Dengelemeli Ses İzi",
-                "raw": "Katman 2: Doğrudan Ses İzi",
-                "tail_focus": "Katman 1+2: Canlı Son Kesit Ses İzi",
-                "pitch_down": "Katman 1+2: DJ Hız/Pitch Düzeltmeli (-3.5%) Ses İzi",
-                "pitch_up": "Katman 1+2: DJ Hız/Pitch Düzeltmeli (+3.5%) Ses İzi",
+                "raw": "Katman 2: Doğrudan Akustik Ses İzi (Shazam)",
+                "clean_music": "Katman 1+2: Gürültü Filtreli Ses İzi (Shazam)",
+                "tail_focus": "Katman 1+2: Son Kesit Ses İzi (Shazam)",
+                "pitch_down": "Katman 1+2: DJ Hız/Pitch (-3%) Ses İzi",
+                "pitch_up": "Katman 1+2: DJ Hız/Pitch (+3%) Ses İzi",
             }
             full_lyrics["recognized"] = True
             full_lyrics["layer_used"] = variant_map.get(
@@ -548,7 +604,7 @@ async def recognize_music_pipeline(
             full_lyrics["elapsed_ms"] = int((time.time() - start_time) * 1000)
             return full_lyrics
 
-        # Ses izi bulamadıysa Katman 3 (AI Vokalden Söz Yakalama) sonucunu al
+        # Akustik ses izi eşleşmediyse Katman 3 (AI Vokalden Söz / Şarkı Yakalama) sonucunu al
         vocal_result = None
         if vocal_task:
             try:
@@ -557,13 +613,13 @@ async def recognize_music_pipeline(
                 pass
             if vocal_result and not vocal_result.get("partial_vocal_only") and vocal_result.get("title"):
                 if isinstance(vocal_result.get("offset_seconds"), (int, float)):
-                    vocal_result["offset_seconds"] = round(float(vocal_result["offset_seconds"]) + 1.6, 2)
+                    vocal_result["offset_seconds"] = round(float(vocal_result["offset_seconds"]) + 1.5, 2)
                 vocal_result["recognized"] = True
                 vocal_result["wave"] = wave
                 vocal_result["elapsed_ms"] = int((time.time() - start_time) * 1000)
                 return vocal_result
 
-        detected_words = []
+        detected_words: List[str] = []
         if vocal_result and vocal_result.get("detected_phrases"):
             detected_words = [p[1] for p in vocal_result["detected_phrases"]]
 
@@ -573,8 +629,8 @@ async def recognize_music_pipeline(
             "detected_words": detected_words,
             "elapsed_ms": int((time.time() - start_time) * 1000),
             "message": (
-                f"Dalga {wave} tarandı ({', '.join(detected_words) if detected_words else 'enstrümantal/vokal bekleniyor'}), "
-                "dinlemeye devam ediliyor..."
+                f"Dalga {wave} tarandı ({', '.join(detected_words) if detected_words else 'müzik/vokal dinleniyor'}), "
+                "aramaya devam ediliyor..."
             ),
         }
     finally:
@@ -590,9 +646,8 @@ async def sync_live_audio_to_lyrics(
     current_offset: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
-    Şarkı sözleri ekranda akarken telefon mikrofonundan gelen canlı sesi (4 sn) analiz eder.
-    1. Öncelik: Canlı akustik parmak izi (Shazam) — 1., 2. ve 3. nakaratı milisaniye hassasiyetle ayırt eder.
-    2. Öncelik: Akustik iz bulunamazsa mevcut saniyeye (current_offset) komşu olan canlı vokal sözünü kullanır.
+    Şarkı sözleri ekranda akarken telefon mikrofonundan gelen canlı sesi analiz ederek
+    sözleri müziğin gerçek saniyesine hizalar.
     """
     work_dir = tempfile.mkdtemp(prefix="sarki_sync_")
     try:
@@ -601,32 +656,32 @@ async def sync_live_audio_to_lyrics(
             f.write(audio_bytes)
 
         loop = asyncio.get_running_loop()
-        norm_path = os.path.join(work_dir, "norm.wav")
+        pcm_path = os.path.join(work_dir, "pcm.wav")
         vocal_path = os.path.join(work_dir, "vocal.wav")
 
         def _prep():
             if FFMPEG_BIN:
                 _run_ffmpeg(
                     raw_path,
-                    norm_path,
-                    "highpass=f=85,lowpass=f=8000,dynaudnorm=f=120:g=15:p=0.92:m=20",
+                    pcm_path,
+                    None,
                     sample_rate=44100,
                     tail_seconds=4.5,
                 )
                 _run_ffmpeg(
                     raw_path,
                     vocal_path,
-                    "highpass=f=180,lowpass=f=4200,equalizer=f=1200:t=q:w=1.2:g=6,dynaudnorm=f=120:g=15:p=0.92:m=15",
+                    "highpass=f=100,lowpass=f=7000,dynaudnorm=f=250:g=15:p=0.92:m=8",
                     sample_rate=16000,
                     tail_seconds=4.5,
                 )
 
         await loop.run_in_executor(_EXECUTOR, _prep)
-        target_norm = norm_path if os.path.exists(norm_path) else raw_path
-        target_vocal = vocal_path if os.path.exists(vocal_path) else target_norm
+        target_pcm = pcm_path if os.path.exists(pcm_path) else raw_path
+        target_vocal = vocal_path if os.path.exists(vocal_path) else target_pcm
 
-        fp_task = asyncio.create_task(_shazam_recognize_single(target_norm, "live_sync"))
-        stt_task = loop.run_in_executor(_EXECUTOR, _extract_vocals_text_sync, target_vocal, ["tr-TR", "en-US"])
+        fp_task = asyncio.create_task(_shazam_recognize_single(target_pcm, "live_sync"))
+        stt_task = loop.run_in_executor(_EXECUTOR, _extract_vocals_text_sync, [target_vocal], ["tr-TR", "en-US"])
 
         fp_res = None
         stt_phrases = []
@@ -639,8 +694,6 @@ async def sync_live_audio_to_lyrics(
         except Exception:
             pass
 
-        # 1. ÖNCELİK: Telefondan duyulan müziğin akustik parmak izi saniyesi (Shazam live offset)
-        # Akustik parmak izi nakarat tekrarlarında (1. nakarat vs 3. nakarat) asla yanılmaz ve yukarı-aşağı zıplama yapmaz!
         if fp_res and fp_res.get("title") and isinstance(fp_res.get("offset_seconds"), (int, float)):
             t1 = lyrics_engine.normalize_text(fp_res.get("title") or "")
             t2 = lyrics_engine.normalize_text(title or "")
@@ -652,12 +705,10 @@ async def sync_live_audio_to_lyrics(
                     "detected_phrase": stt_phrases[0][1] if stt_phrases else "",
                 }
 
-        # 2. ÖNCELİK: Sadece akustik iz eşleşmediyse ve net bir vokal cümlesi (en az 3 kelime) duyulduysa,
-        # mevcut saniyeye (current_offset) yakın olan satırı seç (eski nakarata geri zıplamayı engelle).
         if stt_phrases and lines:
             for _lang, phrase in stt_phrases:
                 cleaned = phrase.strip()
-                if len(cleaned) >= 12 and len(cleaned.split()) >= 3:
+                if len(cleaned) >= 10 and len(cleaned.split()) >= 2:
                     m_idx, m_time = lyrics_engine.find_matching_line_index(
                         lines, cleaned, hint_offset=current_offset
                     )
@@ -667,14 +718,13 @@ async def sync_live_audio_to_lyrics(
                             and current_offset > 0
                             and isinstance(m_time, (int, float))
                         ):
-                            # Mevcut konumdan geriye veya çok uzağa zıplamasına izin verme
                             if float(m_time) < current_offset - 3.5 or float(m_time) > current_offset + 9.0:
                                 continue
                         return {
                             "synced": True,
                             "method": "vocal_live",
                             "matched_line_index": m_idx,
-                            "offset_seconds": round(float(m_time) + 1.5, 2) if m_time is not None else None,
+                            "offset_seconds": round(float(m_time) + 1.4, 2) if m_time is not None else None,
                             "detected_phrase": cleaned,
                         }
 

@@ -805,6 +805,83 @@ body.lyrics-active .app-shell {
   font-size: 0.9rem;
 }
 
+/* Sesli Arama Butonu */
+.voice-search-btn {
+  background: var(--bg-elevated);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
+  padding: 0 13px;
+  border-radius: 12px;
+  font-size: 1.05rem;
+  cursor: pointer;
+  transition: all 0.2s ease;
+}
+
+.voice-search-btn:hover,
+.voice-search-btn.recording {
+  background: rgba(255, 61, 113, 0.22);
+  border-color: var(--accent-secondary);
+  color: #ffffff;
+}
+
+/* Alternatif Eşleşen Şarkılar Çubuğu */
+.candidates-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 0 4px;
+  border-top: 1px solid var(--border-subtle);
+  overflow-x: auto;
+  scrollbar-width: none;
+}
+
+.candidates-bar::-webkit-scrollbar {
+  display: none;
+}
+
+.candidates-label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  color: var(--text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
+}
+
+.candidates-list {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.candidate-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid var(--border-subtle);
+  color: var(--text-main);
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 0.73rem;
+  font-weight: 600;
+  white-space: nowrap;
+  cursor: pointer;
+  transition: all 0.15s ease;
+}
+
+.candidate-chip:hover,
+.candidate-chip.active {
+  background: rgba(0, 229, 255, 0.16);
+  border-color: var(--accent-primary);
+  color: #ffffff;
+}
+
+.ctrl-btn.preview-ctrl {
+  background: rgba(0, 230, 118, 0.15);
+  color: var(--accent-green);
+  border: 1px solid rgba(0, 230, 118, 0.4);
+}
+
 @media (max-width: 480px) {
   :root {
     --lyric-font-size: 1.3rem;

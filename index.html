@@ -6,10 +6,10 @@
   <meta name="theme-color" content="#090a10" />
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
-  <title>Şarkı Sözü Bul — Bar & Canlı Müzik Eşlikçisi</title>
+  <title>Şarkı Sözü Bul — Müzik &amp; Canlı Karaoke Eşlikçisi</title>
   <link rel="manifest" href="manifest.json" />
   <link rel="icon" type="image/svg+xml" href="icon.svg" />
-  <link rel="stylesheet" href="style.css?v=20261031_v9" />
+  <link rel="stylesheet" href="style.css?v=20261108_v10" />
 </head>
 <body>
   <div class="app-shell">
@@ -19,7 +19,7 @@
         <div class="brand-logo" aria-hidden="true">🎵</div>
         <div>
           <h1 class="brand-title">Şarkı Sözü Bul</h1>
-          <p class="brand-subtitle">4 Katmanlı Müzik &amp; Vokal Tanıma</p>
+          <p class="brand-subtitle">4 Katmanlı Müzik &amp; Canlı Söz Motoru</p>
         </div>
       </div>
       <div class="top-actions">
@@ -30,19 +30,19 @@
       </div>
     </header>
 
-    <!-- HTTPS Mikrofon Uyarısı (Sadece HTTP bağlantıda ve mikrofon engellendiğinde görünür) -->
+    <!-- HTTPS Mikrofon Uyarısı (Sadece HTTP bağlantıda görünür) -->
     <div id="httpsBanner" class="https-banner hidden">
       <div class="https-banner-text">
-        <strong>🔒 Telefon Mikrofonu İçin Güvenli Bağlantı:</strong>
-        <span>Tarayıcınız kesintisiz canlı dinleme için HTTPS bağlantısı ister.</span>
+        <strong>🔒 Canlı Mikrofon İçin Güvenli Bağlantı:</strong>
+        <span>Tarayıcınız kesintisiz canlı dinleme için HTTPS bağlantısı veya doğrudan ses kaydı ister.</span>
       </div>
       <div class="https-banner-actions">
-        <a id="httpsRedirectLink" href="#" class="https-btn">🔒 Güvenli (HTTPS) Adrese Geç</a>
-        <button id="btnNativeMicFallback" class="https-btn secondary">🎙️ Doğrudan Ses Kaydet</button>
+        <a id="httpsRedirectLink" href="#" class="https-btn hidden">🔒 Güvenli (HTTPS) Adrese Geç</a>
+        <button id="btnNativeMicFallback" class="https-btn secondary" type="button">🎙️ Mikrofonla Kaydet &amp; Bul</button>
       </div>
     </div>
 
-    <!-- Yedek Native Mikrofon Input (HTTP ortamları için görünmez yedek) -->
+    <!-- Yedek Native Mikrofon Input (HTTP ortamları veya dosya seçimi için) -->
     <input id="nativeAudioInput" type="file" accept="audio/*,video/*" capture="microphone" class="hidden" />
 
     <!-- Ana Dinleme Küresi (Tek Tuşla Bulana Kadar Dinle) -->
@@ -52,44 +52,45 @@
         <button id="btnListen" class="listen-orb" type="button" aria-label="Müziği Dinle ve Sözleri Getir">
           <span id="orbIcon" class="orb-icon">🎧</span>
           <span id="orbMainText" class="orb-main-text">DOKUN &amp; DİNLET</span>
-          <span id="orbSubText" class="orb-sub-text">Bulana kadar otomatik dinler</span>
+          <span id="orbSubText" class="orb-sub-text">Müziği veya söylenen sözü bulur</span>
         </button>
       </div>
 
       <!-- Canlı Dalga ve Katman İlerleme Göstergesi -->
       <div id="listenStatusPanel" class="listen-status-panel">
         <div class="wave-steps">
-          <span id="stepLayer1" class="step-pill">1. Ses Güçlendirme &amp; Filtre</span>
+          <span id="stepLayer1" class="step-pill">1. Spektral Ses Filtresi</span>
           <span id="stepLayer2" class="step-pill">2. Shazam Ses İzi</span>
-          <span id="stepLayer3" class="step-pill">3. YouTube Music Motoru</span>
+          <span id="stepLayer3" class="step-pill">3. YouTube Music &amp; LRCLIB</span>
           <span id="stepLayer4" class="step-pill">4. AI Vokal Söz Eşleme</span>
         </div>
         <p id="statusMessage" class="status-message">
-          Barda çalan Türkçe veya yabancı parçaya telefonu tutun ve tek tuşa basın.
+          Çalan müziğe telefonu tutun, şarkıyı söyleyin veya aşağıdan söz/isim arayın.
         </p>
         <div id="detectedWordsBox" class="detected-words-box hidden">
-          <span class="detected-label">🎤 Müzikten Duyulan:</span>
+          <span class="detected-label">🎤 Duyulan Sözler:</span>
           <span id="detectedWordsText" class="detected-text"></span>
         </div>
       </div>
 
-      <!-- Donanım Seviyesinde Ses Kaydı Alternatifi -->
-      <div class="native-record-box">
-        <button id="btnNativeRecord" class="btn-native-record" type="button">
-          🎙️ Telefonun Kendi Kaydedicisiyle Dinle (100% Garantili)
-        </button>
-      </div>
-
-      <!-- Hızlı Söz / İsim Arama Çubuğu (YouTube Music & Genius Destekli) -->
+      <!-- Hızlı Söz / İsim Arama Çubuğu (YouTube Music, LRCLIB & Genius Destekli) -->
       <form id="searchForm" class="quick-search-bar">
         <input
           id="searchInput"
           type="text"
-          placeholder="Veya duyduğun 2-3 kelimeyi / şarkı adını yaz..."
+          placeholder="Şarkı adı, sanatçı veya duyduğunuz birkaç kelimeyi yazın..."
           autocomplete="off"
         />
+        <button type="button" id="btnVoiceSearch" class="voice-search-btn" title="Sesle Söz / Şarkı Ara">🎤</button>
         <button type="submit" id="btnSearch" class="search-submit-btn">Bul</button>
       </form>
+
+      <!-- Donanım Seviyesinde Ses Kaydı / Dosya Yükleme Alternatifi -->
+      <div class="native-record-box">
+        <button id="btnNativeRecord" class="btn-native-record" type="button">
+          🎙️ Telefonun Ses Kaydedicisiyle veya Ses Dosyasından Bul
+        </button>
+      </div>
     </section>
 
     <!-- Şarkı Sözü & Canlı Karaoke Sahne Ekranı -->
@@ -113,9 +114,18 @@
           </button>
         </div>
 
+        <!-- Alternatif Eşleşen Şarkılar Çubuğu (Aramada birden fazla aday bulunduğunda görünür) -->
+        <div id="candidatesBar" class="candidates-bar hidden">
+          <span class="candidates-label">Diğer Eşleşmeler:</span>
+          <div id="candidatesList" class="candidates-list"></div>
+        </div>
+
         <div class="stage-controls">
           <button id="btnListenAgain" class="ctrl-btn primary-ctrl" type="button">
-            🎧 Yeni Şarkı Dinle
+            🎧 Yeni Dinle
+          </button>
+          <button id="btnPreviewAudio" class="ctrl-btn preview-ctrl hidden" type="button" title="Şarkının önizlemesini dinle">
+            ▶️ Müziği Çal
           </button>
           <button id="btnStopSync" class="ctrl-btn danger-ctrl" type="button" title="Sözlerin akmasını duraklat veya başlat">
             ⏹️ Akışı Durdur
@@ -172,6 +182,6 @@
     </div>
   </div>
 
-  <script src="app.js?v=20261031_v9"></script>
+  <script src="app.js?v=20261108_v10"></script>
 </body>
 </html>

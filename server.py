@@ -9,18 +9,23 @@ import argparse
 import asyncio
 import datetime
 import http.server
+import importlib
 import json
 import os
+import platform
 import re
+import shutil
 import socket
 import socketserver
 import ssl
 import subprocess
 import sys
 import threading
-import urllib.parse
-import webbrowser
+import time
 from typing import Any, Dict, List, Optional
+import urllib.parse
+import urllib.request
+import webbrowser
 
 if os.path.exists("/etc/ssl/cert.pem"):
     os.environ.setdefault("SSL_CERT_FILE", "/etc/ssl/cert.pem")
@@ -37,81 +42,153 @@ KEY_FILE = os.path.join(BASE_DIR, "key.pem")
 TUNNEL_URL_FILE = os.path.join(BASE_DIR, "tunnel_url.txt")
 
 _HISTORY_LOCK = threading.Lock()
+_TUNNEL_LOCK = threading.Lock()
 _TUNNEL_URL = ""
+_TUNNEL_LAST_VERIFIED = 0.0
+_TUNNEL_PROC: Optional[subprocess.Popen] = None
+
+
+def _is_tunnel_alive(url: str) -> bool:
+    """Cloudflare tünelinin gerçekten aktif olup olmadığını (404/530 vermediğini) doğrular."""
+    if not url or not url.startswith("https://"):
+        return False
+    try:
+        ctx = ssl._create_unverified_context()
+        req = urllib.request.Request(
+            f"{url.rstrip('/')}/api/status",
+            headers={"User-Agent": "SarkiSozuBul-HealthCheck/1.0"},
+        )
+        with urllib.request.urlopen(req, timeout=3.5, context=ctx) as resp:
+            return resp.status == 200
+    except Exception:
+        return False
 
 
 def get_tunnel_url() -> str:
-    global _TUNNEL_URL
-    if _TUNNEL_URL:
+    global _TUNNEL_URL, _TUNNEL_LAST_VERIFIED
+    now = time.time()
+    if _TUNNEL_URL and (now - _TUNNEL_LAST_VERIFIED < 45.0):
         return _TUNNEL_URL
-    if os.path.exists(TUNNEL_URL_FILE):
+
+    candidate = _TUNNEL_URL
+    if not candidate and os.path.exists(TUNNEL_URL_FILE):
         try:
             with open(TUNNEL_URL_FILE, "r", encoding="utf-8") as f:
-                val = f.read().strip()
-                if val:
-                    _TUNNEL_URL = val
-                    return val
+                candidate = f.read().strip()
         except Exception:
-            pass
-    return os.environ.get("PUBLIC_HTTPS_URL", "").strip()
+            candidate = ""
+
+    if not candidate:
+        candidate = os.environ.get("PUBLIC_HTTPS_URL", "").strip()
+
+    if candidate and _is_tunnel_alive(candidate):
+        _TUNNEL_URL = candidate
+        _TUNNEL_LAST_VERIFIED = now
+        return _TUNNEL_URL
+
+    # Tünel ölmüşse sıfırla ki istemci bozuk 404 adresine yönlendirilmesin
+    _TUNNEL_URL = ""
+    return ""
 
 
-def start_cloudflared_tunnel_async(local_port: int) -> None:
-    """Mobil tarayıcı mikrofon izni için tek tıkla Cloudflare HTTPS tünelini başlatır."""
-    import platform
-    import shutil
+def _ensure_cloudflared_binary() -> Optional[str]:
+    cf_bin = shutil.which("cloudflared")
+    if cf_bin:
+        return cf_bin
+    candidate = os.path.join(BASE_DIR, "cloudflared")
+    if os.path.exists(candidate) and os.access(candidate, os.X_OK):
+        return candidate
+    try:
+        arch = platform.machine().lower()
+        cf_arch = "arm64" if ("arm" in arch or "aarch" in arch) else "amd64"
+        os_name = "darwin" if "darwin" in platform.system().lower() else "linux"
+        if os_name == "darwin":
+            # macOS için tgz arşivi veya doğrudan binary kontrolü
+            return None
+        download_url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-{os_name}-{cf_arch}"
+        ctx = ssl._create_unverified_context()
+        req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
+        with urllib.request.urlopen(req, timeout=40, context=ctx) as resp, open(candidate, "wb") as fp:
+            shutil.copyfileobj(resp, fp)
+        os.chmod(candidate, 0o755)
+        return candidate
+    except Exception:
+        return None
 
-    def _run():
-        global _TUNNEL_URL
-        cf_bin = shutil.which("cloudflared")
-        candidate = os.path.join(BASE_DIR, "cloudflared")
+
+def start_cloudflared_watchdog(local_port: int) -> None:
+    """
+    Cloudflare HTTPS tünelini başlatır ve tünel düşerse/404 verirse otomatik olarak yeniler.
+    """
+    def _watchdog_loop():
+        global _TUNNEL_URL, _TUNNEL_LAST_VERIFIED, _TUNNEL_PROC
+        cf_bin = _ensure_cloudflared_binary()
         if not cf_bin:
-            if os.path.exists(candidate) and os.access(candidate, os.X_OK):
-                cf_bin = candidate
-            else:
-                try:
-                    arch = platform.machine().lower()
-                    cf_arch = "arm64" if ("arm" in arch or "aarch" in arch) else "amd64"
-                    os_name = "darwin" if "darwin" in platform.system().lower() else "linux"
-                    download_url = f"https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-{os_name}-{cf_arch}"
-                    print(f"📥 Cloudflare Tunnel binary indiriliyor: {download_url}...")
-                    ctx = ssl._create_unverified_context()
-                    req = urllib.request.Request(download_url, headers={"User-Agent": "Mozilla/5.0"})
-                    with urllib.request.urlopen(req, timeout=40, context=ctx) as resp, open(candidate, "wb") as fp:
-                        shutil.copyfileobj(resp, fp)
-                    os.chmod(candidate, 0o755)
-                    cf_bin = candidate
-                    print("✅ Cloudflare Tunnel binary hazır.")
-                except Exception as exc:
-                    sys.stderr.write(f"⚠️ Cloudflare Tunnel indirme hatası: {exc}\n")
-                    return
+            return
 
-        try:
-            print(f"🚀 Cloudflare HTTPS tüneli başlatılıyor (port {local_port})...")
-            proc = subprocess.Popen(
-                [cf_bin, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{local_port}"],
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                bufsize=1,
-            )
-            for line in proc.stdout:
-                match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
-                if match:
-                    found_url = match.group(0)
-                    _TUNNEL_URL = found_url
+        # Başlangıçta mevcut tunnel_url.txt canlı mı kontrol et
+        time.sleep(1.5)
+        if get_tunnel_url():
+            pass
+
+        while True:
+            try:
+                if _TUNNEL_URL and _is_tunnel_alive(_TUNNEL_URL):
+                    _TUNNEL_LAST_VERIFIED = time.time()
+                    time.sleep(45)
+                    continue
+
+                # Eski çalışmayan cloudflared süreçlerini temizle
+                with _TUNNEL_LOCK:
+                    if _TUNNEL_PROC is not None:
+                        try:
+                            _TUNNEL_PROC.terminate()
+                            _TUNNEL_PROC.wait(timeout=3)
+                        except Exception:
+                            try:
+                                _TUNNEL_PROC.kill()
+                            except Exception:
+                                pass
+                        _TUNNEL_PROC = None
+
                     try:
-                        with open(TUNNEL_URL_FILE, "w", encoding="utf-8") as f:
-                            f.write(found_url)
+                        if os.path.exists(TUNNEL_URL_FILE):
+                            os.remove(TUNNEL_URL_FILE)
                     except Exception:
                         pass
-                    print("=" * 64)
-                    print(f"🌍 CANLI GÜVENLİ MOBİL HTTPS ADRESİ: {found_url}")
-                    print("=" * 64)
-        except Exception as exc:
-            sys.stderr.write(f"⚠️ Cloudflare Tunnel çalıştırma hatası: {exc}\n")
+                    _TUNNEL_URL = ""
 
-    t = threading.Thread(target=_run, daemon=True)
+                    proc = subprocess.Popen(
+                        [cf_bin, "tunnel", "--no-autoupdate", "--url", f"http://127.0.0.1:{local_port}"],
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.STDOUT,
+                        text=True,
+                        bufsize=1,
+                    )
+                    _TUNNEL_PROC = proc
+
+                if proc.stdout:
+                    for line in proc.stdout:
+                        match = re.search(r"https://[a-zA-Z0-9-]+\.trycloudflare\.com", line)
+                        if match:
+                            found_url = match.group(0)
+                            # Yeni tünelin DNS/Edge kaydının oturması için kısa bekleme
+                            time.sleep(2.0)
+                            _TUNNEL_URL = found_url
+                            _TUNNEL_LAST_VERIFIED = time.time()
+                            try:
+                                with open(TUNNEL_URL_FILE, "w", encoding="utf-8") as f:
+                                    f.write(found_url)
+                            except Exception:
+                                pass
+                            print("=" * 64)
+                            print(f"🌍 CANLI GÜVENLİ MOBİL HTTPS ADRESİ: {found_url}")
+                            print("=" * 64)
+            except Exception as exc:
+                sys.stderr.write(f"⚠️ Cloudflare Tunnel döngü hatası: {exc}\n")
+            time.sleep(10)
+
+    t = threading.Thread(target=_watchdog_loop, daemon=True)
     t.start()
 
 
@@ -144,7 +221,6 @@ def save_to_history(song_data: Dict[str, Any]) -> None:
         title_norm = (song_data.get("title") or "").strip().lower()
         artist_norm = (song_data.get("artist") or "").strip().lower()
 
-        # Aynı şarkı son kayıtta zaten varsa tekrar ekleme, zamanını güncelle
         items = [
             x for x in items
             if not (
@@ -160,6 +236,7 @@ def save_to_history(song_data: Dict[str, Any]) -> None:
             "artist": song_data.get("artist") or "",
             "album": song_data.get("album") or "",
             "cover": song_data.get("cover") or "",
+            "preview_url": song_data.get("preview_url") or "",
             "synced": bool(song_data.get("synced")),
             "layer_used": song_data.get("layer_used") or "",
             "source": song_data.get("source") or "",
@@ -214,9 +291,15 @@ def record_log(msg: str) -> None:
     global _RECENT_LOGS
     line = f"[{datetime.datetime.now().strftime('%H:%M:%S')}] {msg}"
     _RECENT_LOGS.append(line)
-    if len(_RECENT_LOGS) > 100:
+    if len(_RECENT_LOGS) > 120:
         _RECENT_LOGS.pop(0)
     sys.stderr.write(line + "\n")
+
+
+CORS_HEADERS = (
+    "Content-Type, X-Wave, X-File-Ext, X-Lang, X-Browser-Transcript, "
+    "X-Track-Title, X-Track-Artist, X-Current-Offset"
+)
 
 
 class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
@@ -235,7 +318,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-store")
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Wave, X-File-Ext, X-Lang, X-Track-Title, X-Track-Artist, X-Current-Offset")
+        self.send_header("Access-Control-Allow-Headers", CORS_HEADERS)
         self.end_headers()
         self.wfile.write(payload)
 
@@ -243,7 +326,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
         self.send_response(204)
         self.send_header("Access-Control-Allow-Origin", "*")
         self.send_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type, X-Wave, X-File-Ext, X-Lang, X-Track-Title, X-Track-Artist, X-Current-Offset")
+        self.send_header("Access-Control-Allow-Headers", CORS_HEADERS)
         self.end_headers()
 
     def do_GET(self) -> None:
@@ -254,6 +337,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/status":
             self._send_json({
                 "ok": True,
+                "version": "2026.11.08-v2",
                 "engines": {
                     "ffmpeg_dsp": bool(recognition_engine.FFMPEG_BIN),
                     "shazamio_fp": bool(recognition_engine.HAS_SHAZAMIO),
@@ -269,13 +353,15 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
         if path == "/api/debug":
             self._send_json({
                 "ok": True,
+                "version": "2026.11.08-v2",
                 "engines": {
                     "ffmpeg": bool(recognition_engine.FFMPEG_BIN),
                     "shazam": bool(recognition_engine.HAS_SHAZAMIO),
                     "speech_rec": bool(recognition_engine.HAS_SPEECH_REC),
                     "ytmusic": bool(lyrics_engine._get_ytmusic()),
                 },
-                "logs": _RECENT_LOGS[-50:],
+                "tunnel_url": _TUNNEL_URL,
+                "logs": _RECENT_LOGS[-60:],
             })
             return
 
@@ -293,9 +379,27 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                 res["recognized"] = True
                 res["layer_used"] = "Doğrudan Söz / Şarkı Arama"
                 save_to_history(res)
-                self._send_json({"ok": True, "result": res})
+                self._send_json({
+                    "ok": True,
+                    "result": res,
+                    "candidates": res.get("candidates") or [],
+                })
             else:
                 self._send_json({"ok": False, "error": "Eşleşen şarkı veya söz bulunamadı."})
+            return
+
+        if path == "/api/lyrics":
+            title = (qs.get("title", [""])[0] or "").strip()
+            artist = (qs.get("artist", [""])[0] or "").strip()
+            cover = (qs.get("cover", [""])[0] or "").strip()
+            if not title:
+                self._send_json({"ok": False, "error": "Şarkı adı gerekli."}, 400)
+                return
+            res = lyrics_engine.get_full_lyrics_for_track(title, artist, cover=cover)
+            res["recognized"] = True
+            res["layer_used"] = "Seçilen Şarkı"
+            save_to_history(res)
+            self._send_json({"ok": True, "result": res})
             return
 
         return super().do_GET()
@@ -328,6 +432,8 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
             wave_str = self.headers.get("X-Wave", "1")
             file_ext = self.headers.get("X-File-Ext", ".wav")
             lang = self.headers.get("X-Lang", "auto")
+            raw_transcript = self.headers.get("X-Browser-Transcript", "") or ""
+            browser_transcript = urllib.parse.unquote(raw_transcript).strip()
             try:
                 wave = max(1, int(wave_str))
             except ValueError:
@@ -336,7 +442,10 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
             if not file_ext.startswith("."):
                 file_ext = "." + file_ext
 
-            record_log(f"🎙️ Gelen ses: {len(body)} bayt, Wave={wave_str}, Ext={file_ext}")
+            record_log(
+                f"🎙️ Gelen ses: {len(body)} bayt, Wave={wave_str}, Ext={file_ext}"
+                + (f", CanlıMetin='{browser_transcript}'" if browser_transcript else "")
+            )
 
             try:
                 result = asyncio.run(
@@ -345,10 +454,13 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                         file_ext=file_ext,
                         wave=wave,
                         preferred_lang=lang,
+                        browser_transcript=browser_transcript,
                     )
                 )
                 if result.get("recognized") and result.get("title"):
-                    record_log(f"🎉 Şarkı bulundu: {result.get('title')} - {result.get('artist')} [{result.get('layer_used')}]")
+                    record_log(
+                        f"🎉 Şarkı bulundu: {result.get('title')} - {result.get('artist')} [{result.get('layer_used')}]"
+                    )
                     save_to_history(result)
                 else:
                     record_log(f"🔍 Dalga {wave_str} arandı ({result.get('elapsed_ms')}ms): Eşleşme yok.")
@@ -375,7 +487,6 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
             except ValueError:
                 current_offset = None
 
-            # Geçmişten mevcut şarkının satırlarını bul
             lines_for_sync: List[Dict[str, Any]] = []
             for h_item in load_history():
                 if (h_item.get("title") or "").strip().lower() == raw_title.strip().lower():
@@ -415,28 +526,22 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
 
         if path == "/api/pull-github":
             try:
-                import urllib.request as ureq
-
-                # Varsa gövdeden ref/sha al; yoksa GitHub API üzerinden en son commit SHA'sını çöz
-                # Böylece Fastly / GitHub Raw CDN önbelleği (5 dk) tamamen aşılır, güncellemeler anında iner.
                 target_ref = "main"
-                try:
-                    content_length = int(self.headers.get("Content-Length", 0))
-                    if content_length > 0:
-                        body_json = json.loads(self.rfile.read(content_length).decode("utf-8"))
+                if body:
+                    try:
+                        body_json = json.loads(body.decode("utf-8", errors="replace"))
                         if isinstance(body_json, dict) and body_json.get("ref"):
                             target_ref = str(body_json["ref"]).strip()
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
 
-                # GitHub API ile doğrudan commit SHA al (asla önbelleğe takılmaz)
                 try:
                     gh_api_url = f"https://api.github.com/repos/selimbayanoglu-beep/sarki-sozu-bul/commits/{target_ref}"
-                    gh_req = ureq.Request(
+                    gh_req = urllib.request.Request(
                         gh_api_url,
                         headers={"User-Agent": "SarkiSozuBul-Deploy/2.0", "Accept": "application/vnd.github.v3+json"},
                     )
-                    with ureq.urlopen(gh_req, timeout=8) as gh_resp:
+                    with urllib.request.urlopen(gh_req, timeout=8) as gh_resp:
                         c_info = json.loads(gh_resp.read().decode("utf-8"))
                         if "sha" in c_info:
                             target_ref = c_info["sha"]
@@ -460,7 +565,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                 for fname in files_to_sync:
                     try:
                         url = f"{repo_base}{fname}"
-                        req = ureq.Request(
+                        req = urllib.request.Request(
                             url,
                             headers={
                                 "Cache-Control": "no-cache, no-store, must-revalidate",
@@ -468,7 +573,7 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                                 "User-Agent": "Mozilla/5.0",
                             },
                         )
-                        with ureq.urlopen(req, timeout=12) as resp:
+                        with urllib.request.urlopen(req, timeout=12) as resp:
                             data = resp.read()
                         if data:
                             target_path = os.path.join(BASE_DIR, fname)
@@ -478,24 +583,19 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                     except Exception as exc:
                         errors.append(f"{fname}: {exc}")
 
-                # Yeni bağımlılıklar varsa (ytmusicapi vb.) pip ile otomatik kur
                 req_file = os.path.join(BASE_DIR, "requirements.txt")
                 if os.path.exists(req_file):
                     try:
-                        record_log("📦 Bağımlılıklar güncelleniyor (pip install)...")
                         subprocess.run(
                             [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--break-system-packages", "-r", req_file],
                             stdout=subprocess.DEVNULL,
                             stderr=subprocess.DEVNULL,
                             timeout=60,
                         )
-                        record_log("✅ Bağımlılıklar güncellendi.")
-                    except Exception as pip_err:
-                        record_log(f"⚠️ Pip kurulum uyarısı: {pip_err}")
+                    except Exception:
+                        pass
 
-                # Bellekteki motorları anında yeniden yükle
                 try:
-                    import importlib
                     importlib.reload(lyrics_engine)
                     importlib.reload(recognition_engine)
                 except Exception:
@@ -508,16 +608,14 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                     "errors": errors,
                 })
 
-                # Yeni kod ve rotaların devreye girmesi için süreci sıfır kesintiyle yeniden başlat
                 def _restart_process():
                     time.sleep(0.6)
                     try:
-                        record_log("🔄 Sunucu süreci yeni kod ile yeniden başlatılıyor (os.execv)...")
+                        record_log("🔄 Sunucu süreci yeni kod ile yeniden başlatılıyor...")
                         os.execv(sys.executable, [sys.executable] + sys.argv)
                     except Exception as re_err:
                         record_log(f"Restart hatası: {re_err}")
 
-                import threading
                 threading.Thread(target=_restart_process, daemon=True).start()
                 return
             except Exception as e:
@@ -559,10 +657,10 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
-    # Mobil cihazlar için sıfır uyarılı Cloudflare HTTPS tünelini başlat
-    start_cloudflared_tunnel_async(args.port)
+    # Mobil cihazlar için kendi kendini onaran Cloudflare HTTPS tünel bekçisini başlat
+    start_cloudflared_watchdog(args.port)
 
-    # Arka planda yerel HTTPS sunucusunu da başlat (yedek)
+    # Arka planda yerel HTTPS sunucusunu da başlat
     https_thread = threading.Thread(target=start_https_server, args=(args.https_port,), daemon=True)
     https_thread.start()
 
