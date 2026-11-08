@@ -4,24 +4,37 @@ services:
     image: python:3.11-slim
     container_name: sarki-sozu-bul
     restart: unless-stopped
+    working_dir: /app
+    environment:
+      PORT: "8891"
+      HTTPS_PORT: "8892"
+      PYTHONUNBUFFERED: "1"
     ports:
-      - "8891:8891"
-      - "8892:8892"
+      - target: 8891
+        published: "8891"
+        protocol: tcp
+      - target: 8892
+        published: "8892"
+        protocol: tcp
     command:
-      - sh
+      - python3
       - -c
-      - |
-        which ffmpeg >/dev/null 2>&1 || (apt-get update && apt-get install -y --no-install-recommends ffmpeg git curl ca-certificates openssl) &&
-        mkdir -p /app && cd /app &&
-        rm -rf /tmp/sarki-repo &&
-        git clone --depth 1 https://github.com/selimbayanoglu-beep/sarki-sozu-bul.git /tmp/sarki-repo &&
-        cp -f /tmp/sarki-repo/*.py /tmp/sarki-repo/*.html /tmp/sarki-repo/*.css /tmp/sarki-repo/*.js /tmp/sarki-repo/*.json /tmp/sarki-repo/*.svg /tmp/sarki-repo/*.txt /tmp/sarki-repo/*.sh /app/ 2>/dev/null || true &&
-        rm -rf /tmp/sarki-repo &&
-        pip install -r /app/requirements.txt &&
-        python3 /app/server.py --port 8891 --https-port 8892 --no-browser
+      - "import io,os,ssl,sys,urllib.request,zipfile; os.makedirs('/app',exist_ok=True); ctx=ssl._create_unverified_context(); z=zipfile.ZipFile(io.BytesIO(urllib.request.urlopen('https://codeload.github.com/selimbayanoglu-beep/sarki-sozu-bul/zip/refs/heads/main',context=ctx,timeout=25).read())); [open('/app/'+os.path.basename(m),'wb').write(z.read(m)) for m in z.namelist() if not m.endswith('/') and m.count('/')==1 and not (os.path.basename(m)=='history.json' and os.path.exists('/app/history.json'))]; os.execv(sys.executable,[sys.executable,'/app/server.py','--port','8891','--https-port','8892','--no-browser'])"
 x-casaos:
+  architectures:
+    - amd64
+    - arm64
   main: sarki-sozu-bul
-  title:
-    tr_tr: Şarkı Sözü Bul
-  port_map: "8891"
+  author: Selim
+  category: Music
+  description:
+    en_us: 4-Layer Music & Live Vocal Recognition to Synced Karaoke Lyrics
+    tr_tr: 4 Katmanlı Müzik ve Vokal Tanıma ile Canlı Senkronize Şarkı Sözü Bulucu
+  hostname: 159.195.255.168
+  icon: https://raw.githubusercontent.com/selimbayanoglu-beep/sarki-sozu-bul/main/icon.svg
   index: /
+  port_map: "8891"
+  scheme: http
+  title:
+    en_us: Sarki Sozu Bul
+    tr_tr: Şarkı Sözü Bul

@@ -86,6 +86,37 @@ if not FFMPEG_BIN:
 _EXECUTOR = ThreadPoolExecutor(max_workers=8)
 
 
+def refresh_optional_dependencies() -> None:
+    """Arka planda kurulan shazamio, SpeechRecognition ve ffmpeg araçlarını canlı olarak devreye alır."""
+    global HAS_SHAZAMIO, HAS_SPEECH_REC, FFMPEG_BIN, Shazam, Recognizer, sr, _CA_PATH
+    if not _CA_PATH:
+        try:
+            import certifi
+            _CA_PATH = certifi.where()
+            os.environ["SSL_CERT_FILE"] = _CA_PATH
+            os.environ["REQUESTS_CA_BUNDLE"] = _CA_PATH
+        except Exception:
+            pass
+    if not HAS_SHAZAMIO:
+        try:
+            from shazamio import Shazam as _Shazam
+            from shazamio_core import Recognizer as _Recognizer
+            Shazam = _Shazam
+            Recognizer = _Recognizer
+            HAS_SHAZAMIO = True
+        except Exception:
+            pass
+    if not HAS_SPEECH_REC:
+        try:
+            import speech_recognition as _sr
+            sr = _sr
+            HAS_SPEECH_REC = True
+        except Exception:
+            pass
+    if not FFMPEG_BIN:
+        FFMPEG_BIN = shutil.which("ffmpeg")
+
+
 def _run_ffmpeg(
     input_path: str,
     output_path: str,
@@ -529,6 +560,8 @@ async def recognize_music_pipeline(
     """
     Ana 4 Katmanlı Müzik & Vokal Tanıma Hattı.
     """
+    if not HAS_SHAZAMIO or not HAS_SPEECH_REC or not FFMPEG_BIN:
+        refresh_optional_dependencies()
     start_time = time.time()
     work_dir = tempfile.mkdtemp(prefix="sarki_bul_")
 
@@ -651,6 +684,8 @@ async def sync_live_audio_to_lyrics(
     Şarkı sözleri ekranda akarken telefon mikrofonundan gelen canlı sesi analiz ederek
     sözleri müziğin gerçek saniyesine hizalar.
     """
+    if not HAS_SHAZAMIO or not HAS_SPEECH_REC or not FFMPEG_BIN:
+        refresh_optional_dependencies()
     work_dir = tempfile.mkdtemp(prefix="sarki_sync_")
     try:
         raw_path = os.path.join(work_dir, f"sync{file_ext}")

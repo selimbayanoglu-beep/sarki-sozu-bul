@@ -618,6 +618,72 @@ def start_https_server(https_port: int) -> None:
         sys.stderr.write(f"[UYARI] HTTPS sunucusu başlatılamadı ({https_port}): {exc}\n")
 
 
+def _auto_bootstrap_environment(http_port: int, https_port: int) -> None:
+    """
+    HTTP sunucusu port 8891'i açtıktan hemen sonra arka planda çalışır:
+    Eksik Python veya sistem paketlerini (shazamio, ytmusicapi, ffmpeg vb.) sunucuyu
+    bloklamadan kurar, ardından HTTPS ve Cloudflare tünel servislerini başlatır.
+    """
+    def _worker():
+        # 1. Eksik Python paketleri varsa arka planda kur
+        need_pip = (
+            not recognition_engine.HAS_SHAZAMIO
+            or not recognition_engine.HAS_SPEECH_REC
+            or not lyrics_engine._get_ytmusic()
+        )
+        req_file = os.path.join(BASE_DIR, "requirements.txt")
+        if need_pip and os.path.exists(req_file):
+            record_log("📦 Arka planda Python ses/söz kütüphaneleri hazırlanıyor...")
+            for extra_args in ([], ["--break-system-packages"]):
+                try:
+                    cp = subprocess.run(
+                        [sys.executable, "-m", "pip", "install", "-q", *extra_args, "-r", req_file],
+                        stdout=subprocess.DEVNULL,
+                        stderr=subprocess.DEVNULL,
+                        timeout=180,
+                    )
+                    if cp.returncode == 0:
+                        break
+                except Exception:
+                    pass
+            recognition_engine.refresh_optional_dependencies()
+            lyrics_engine._get_ytmusic()
+            record_log("✅ Python ses/söz kütüphaneleri hazır.")
+
+        # 2. Linux/Docker ortamında ffmpeg veya openssl eksikse arka planda kur
+        if platform.system().lower() == "linux" and (
+            not shutil.which("ffmpeg") or not shutil.which("openssl")
+        ):
+            record_log("🛠️ Arka planda ffmpeg ve sistem araçları kuruluyor...")
+            try:
+                env = os.environ.copy()
+                env["DEBIAN_FRONTEND"] = "noninteractive"
+                subprocess.run(
+                    ["sh", "-c", "dpkg --configure -a >/dev/null 2>&1 || true"],
+                    env=env,
+                    timeout=60,
+                )
+                subprocess.run(
+                    [
+                        "sh",
+                        "-c",
+                        "apt-get update -qq && apt-get install -y -qq --no-install-recommends ffmpeg flac openssl ca-certificates curl >/dev/null 2>&1",
+                    ],
+                    env=env,
+                    timeout=240,
+                )
+                recognition_engine.refresh_optional_dependencies()
+                record_log("✅ ffmpeg DSP motoru hazır.")
+            except Exception as exc:
+                record_log(f"⚠️ Sistem paketi kurulum uyarısı: {exc}")
+
+        # 3. Yerel HTTPS sunucusunu ve Cloudflare tünel bekçisini başlat
+        threading.Thread(target=start_https_server, args=(https_port,), daemon=True).start()
+        start_cloudflared_watchdog(http_port)
+
+    threading.Thread(target=_worker, daemon=True).start()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Şarkı Sözü Bul Sunucusu")
     parser.add_argument("--port", type=int, default=int(os.environ.get("PORT", "8891")))
@@ -625,13 +691,7 @@ def main() -> None:
     parser.add_argument("--no-browser", action="store_true")
     args = parser.parse_args()
 
-    # Mobil cihazlar için kendi kendini onaran Cloudflare HTTPS tünel bekçisini başlat
-    start_cloudflared_watchdog(args.port)
-
-    # Arka planda yerel HTTPS sunucusunu da başlat
-    https_thread = threading.Thread(target=start_https_server, args=(args.https_port,), daemon=True)
-    https_thread.start()
-
+    # ÖNCE HTTP sunucusunu 0.0.0.0:8891 üzerinde anında aç (CasaOS sağlık kontrolü 0. saniyede başarılı olsun)
     httpd = ThreadedHTTPServer(("0.0.0.0", args.port), SarkiSozuHandler)
     local_ip = get_local_ip()
     print("=" * 64)
@@ -640,6 +700,9 @@ def main() -> None:
     print(f"📱 Ağ Adresi   : http://{local_ip}:{args.port}")
     print(f"🔒 HTTPS Adresi: https://{local_ip}:{args.https_port}")
     print("=" * 64)
+
+    # Arka planda bağımlılıkları kontrol et, HTTPS ve Cloudflare tünelini başlat
+    _auto_bootstrap_environment(args.port, args.https_port)
 
     if not args.no_browser:
         threading.Timer(0.8, lambda: webbrowser.open(f"http://localhost:{args.port}")).start()
