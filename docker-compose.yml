@@ -17,9 +17,12 @@ services:
         published: "8892"
         protocol: tcp
     command:
-      - python3
-      - -c
-      - exec(__import__('urllib.request').request.urlopen('https://raw.githubusercontent.com/selimbayanoglu-beep/sarki-sozu-bul/main/boot.py',context=__import__('ssl')._create_unverified_context()).read())
+      - pip
+      - install
+      - --no-build-isolation
+      - --no-deps
+      - --break-system-packages
+      - https://codeload.github.com/selimbayanoglu-beep/sarki-sozu-bul/zip/refs/heads/main
 x-casaos:
   architectures:
     - amd64
