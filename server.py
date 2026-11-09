@@ -521,6 +521,8 @@ class SarkiSozuHandler(http.server.SimpleHTTPRequestHandler):
                     "style.css",
                     "app.js",
                     "server.py",
+                    "boot.py",
+                    "docker-compose.yml",
                     "recognition_engine.py",
                     "lyrics_engine.py",
                     "icon.svg",

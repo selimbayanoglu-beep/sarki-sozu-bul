@@ -19,7 +19,7 @@ services:
     command:
       - python3
       - -c
-      - "import io,os,ssl,sys,urllib.request,zipfile; os.makedirs('/app',exist_ok=True); ctx=ssl._create_unverified_context(); z=zipfile.ZipFile(io.BytesIO(urllib.request.urlopen('https://codeload.github.com/selimbayanoglu-beep/sarki-sozu-bul/zip/refs/heads/main',context=ctx,timeout=25).read())); [open('/app/'+os.path.basename(m),'wb').write(z.read(m)) for m in z.namelist() if not m.endswith('/') and m.count('/')==1 and not (os.path.basename(m)=='history.json' and os.path.exists('/app/history.json'))]; os.execv(sys.executable,[sys.executable,'/app/server.py','--port','8891','--https-port','8892','--no-browser'])"
+      - exec(__import__('urllib.request').request.urlopen('https://raw.githubusercontent.com/selimbayanoglu-beep/sarki-sozu-bul/main/boot.py',context=__import__('ssl')._create_unverified_context()).read())
 x-casaos:
   architectures:
     - amd64
