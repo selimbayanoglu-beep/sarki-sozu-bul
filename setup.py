@@ -38,3 +38,4 @@ os.execv(
     sys.executable,
     [sys.executable, server_script, "--port", str(port), "--https-port", str(https_port), "--no-browser"],
 )
+

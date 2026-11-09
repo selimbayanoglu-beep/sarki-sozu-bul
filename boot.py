@@ -13,7 +13,7 @@ import sys
 import urllib.request
 import zipfile
 
-APP_DIR = "/app" if os.access("/", os.W_OK) else os.path.dirname(os.path.abspath(__file__))
+APP_DIR = "/app" if os.path.exists("/app") or os.access("/", os.W_OK) else os.getcwd()
 os.makedirs(APP_DIR, exist_ok=True)
 
 ZIP_URL = "https://codeload.github.com/selimbayanoglu-beep/sarki-sozu-bul/zip/refs/heads/main"
@@ -43,7 +43,18 @@ server_script = os.path.join(APP_DIR, "server.py")
 port = os.environ.get("PORT", "8891")
 https_port = os.environ.get("HTTPS_PORT", "8892")
 
+try:
+    import subprocess
+    subprocess.Popen(
+        [sys.executable, "-m", "pip", "install", "--no-cache-dir", "--quiet", "shazamio", "ytmusicapi", "SpeechRecognition"],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+except Exception:
+    pass
+
 os.execv(
     sys.executable,
     [sys.executable, server_script, "--port", str(port), "--https-port", str(https_port), "--no-browser"],
 )
+
